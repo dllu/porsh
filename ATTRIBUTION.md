@@ -11,6 +11,10 @@
 
 The model binary is distributed unmodified. Runtime material parameters can be changed interactively by the viewer; shared adaptations of the model remain subject to CC BY-SA 4.0.
 
+## Trademark notice
+
+This independent visualization is not sponsored, approved, or endorsed by, and is not associated or otherwise affiliated with, Dr. Ing. h.c. F. Porsche AG or Porsche Cars North America, Inc. Porsche, Porsche 959, and related model names and numbers are trademarks of Dr. Ing. h.c. F. Porsche AG; the distinctive shapes of Porsche automobiles are its trade dress. References are for identification only.
+
 ## Studio environment
 
 - Title: **Studio Small 09**

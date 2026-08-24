@@ -737,6 +737,15 @@ body.is-ready .credits-card.is-open {
   line-height: 1.65;
 }
 
+.credits-card .credits-card__legal {
+  margin-top: 16px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 9px;
+  line-height: 1.6;
+}
+
 .credits-card a {
   color: rgba(255, 255, 255, 0.84);
   text-underline-offset: 3px;

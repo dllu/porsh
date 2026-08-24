@@ -11,8 +11,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import './style.css';
 
-const MODEL_URL = '/models/porsche-959.glb';
-const ENVIRONMENT_URL = '/environment/studio-small-09-2k.hdr';
+const MODEL_URL = `${import.meta.env.BASE_URL}models/porsche-959.glb`;
+const ENVIRONMENT_URL = `${import.meta.env.BASE_URL}environment/studio-small-09-2k.hdr`;
 
 const canvas = document.querySelector('#scene');
 const loadingProgress = document.querySelector('#loading-progress');

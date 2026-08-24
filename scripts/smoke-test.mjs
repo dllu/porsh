@@ -90,6 +90,11 @@ try {
   if ((await page.locator('#active-view-label').textContent()) !== 'PROFILE') failures.push('camera preset did not update');
   await page.screenshot({ path: 'viewer-profile-smoke.png', fullPage: true, timeout: 90_000 });
 
+  await page.locator('#credits-button').click();
+  const legalNotice = await page.locator('.credits-card__legal').textContent();
+  if (!legalNotice?.includes('not associated or otherwise affiliated')) failures.push('trademark disclaimer is missing');
+  await page.locator('#credits-close').click();
+
   await page.locator('#settings-button').click();
   if (!(await page.locator('#settings-panel').getAttribute('class')).includes('is-open')) failures.push('settings panel did not open');
   await page.locator('[data-paint="Night Blue"]').click();

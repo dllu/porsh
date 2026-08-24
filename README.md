@@ -13,6 +13,17 @@ Open the URL shown by Vite. Production output can be generated with `npm run bui
 
 The site is entirely static. After dependencies are installed, the model and lighting environment are served locally and no Sketchfab login is needed.
 
+## Deploy to a static server
+
+```bash
+npm ci
+npm run build
+```
+
+Upload the **contents of `dist/`** to the desired directory on the web server. Node.js is only needed during the build; the deployed site has no server-side runtime, database, environment variables, or external model requests. The build uses relative asset paths, so it works at either a domain root such as `https://example.com/` or a subdirectory such as `https://example.com/porsh/`.
+
+Serve the files over HTTP(S), not directly from a `file://` URL. No single-page-app fallback rules are needed because the viewer has no client-side routes.
+
 ## Controls
 
 - Drag to orbit and scroll/pinch to zoom.
