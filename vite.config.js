@@ -6,6 +6,10 @@ import { defineConfig } from 'vite';
 const projectRoot = dirname(fileURLToPath(import.meta.url));
 const manifestPath = resolve(projectRoot, 'local-models', 'wwc', 'protection-manifest.json');
 const protectedDirectory = resolve(projectRoot, 'public', 'models', 'protected');
+const modelRuntimeModule = 'virtual:p959-model-runtime';
+const modelWorkerKeyModule = 'virtual:p959-model-worker-key';
+const resolvedModelRuntimeModule = `\0${modelRuntimeModule}`;
+const resolvedModelWorkerKeyModule = `\0${modelWorkerKeyModule}`;
 
 function loadProtectedModelConfig() {
   if (!existsSync(manifestPath)) {
@@ -25,19 +29,43 @@ function loadProtectedModelConfig() {
   return manifest;
 }
 
+function protectedModelPlugin(manifest) {
+  const modelMeta = {
+    formatVersion: manifest.formatVersion,
+    publicPath: manifest.publicPath,
+    payloadBytes: manifest.payloadBytes,
+    sourceBytes: manifest.sourceBytes,
+  };
+
+  return {
+    name: 'p959-protected-model',
+    resolveId(source) {
+      if (source === modelRuntimeModule) return resolvedModelRuntimeModule;
+      if (source === modelWorkerKeyModule) return resolvedModelWorkerKeyModule;
+      return null;
+    },
+    load(id) {
+      if (id === resolvedModelRuntimeModule) {
+        return [
+          `export const modelMeta = ${JSON.stringify(modelMeta)};`,
+          `export const keyShareA = ${JSON.stringify(manifest.keyShareA)};`,
+        ].join('\n');
+      }
+      if (id === resolvedModelWorkerKeyModule) {
+        return `export const keyShareB = ${JSON.stringify(manifest.keyShareB)};`;
+      }
+      return null;
+    },
+  };
+}
+
 export default defineConfig(() => {
   const manifest = loadProtectedModelConfig();
   return {
     base: './',
-    define: {
-      __P959_MODEL_META__: JSON.stringify({
-        formatVersion: manifest.formatVersion,
-        publicPath: manifest.publicPath,
-        payloadBytes: manifest.payloadBytes,
-        sourceBytes: manifest.sourceBytes,
-      }),
-      __P959_MODEL_KEY_SHARE_A__: JSON.stringify(manifest.keyShareA),
-      __P959_MODEL_KEY_SHARE_B__: JSON.stringify(manifest.keyShareB),
+    plugins: [protectedModelPlugin(manifest)],
+    worker: {
+      plugins: () => [protectedModelPlugin(manifest)],
     },
   };
 });

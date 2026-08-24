@@ -1,4 +1,5 @@
 import { gunzipSync } from 'fflate';
+import { keyShareB as encodedKeyShareB } from 'virtual:p959-model-worker-key';
 
 const HEADER_BYTES = 32;
 const AUTH_TAG_BYTES = 16;
@@ -26,7 +27,7 @@ self.onmessage = async (event) => {
   try {
     const payload = new Uint8Array(event.data.payload);
     keyShareA = new Uint8Array(event.data.keyShareA);
-    keyShareB = decodeBase64(__P959_MODEL_KEY_SHARE_B__).reverse();
+    keyShareB = decodeBase64(encodedKeyShareB).reverse();
 
     if (payload.byteLength <= HEADER_BYTES + AUTH_TAG_BYTES || !matchesMagic(payload)) {
       throw new Error('Protected model header is invalid.');

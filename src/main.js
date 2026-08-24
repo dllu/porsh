@@ -9,9 +9,10 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+import { keyShareA as encodedKeyShareA, modelMeta } from 'virtual:p959-model-runtime';
 import './style.css';
 
-const MODEL_META = __P959_MODEL_META__;
+const MODEL_META = modelMeta;
 const MODEL_URL = `${import.meta.env.BASE_URL}${MODEL_META.publicPath}`;
 const ENVIRONMENT_URL = `${import.meta.env.BASE_URL}environment/studio-small-09-2k.hdr`;
 
@@ -326,7 +327,7 @@ function decodeBase64(value) {
 
 function decryptProtectedModel(payload) {
   const worker = new Worker(new URL('./model-decrypt.worker.js', import.meta.url), { type: 'module' });
-  const keyShareA = decodeBase64(__P959_MODEL_KEY_SHARE_A__);
+  const keyShareA = decodeBase64(encodedKeyShareA);
 
   return new Promise((resolve, reject) => {
     const finish = () => worker.terminate();
