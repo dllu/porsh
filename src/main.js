@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -11,7 +11,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import './style.css';
 
-const MODEL_URL = `${import.meta.env.BASE_URL}models/porsche-959.glb`;
+const MODEL_URL = `${import.meta.env.BASE_URL}models/wwc/87_porsche_959_WWC.fbx`;
 const ENVIRONMENT_URL = `${import.meta.env.BASE_URL}environment/studio-small-09-2k.hdr`;
 
 const canvas = document.querySelector('#scene');
@@ -185,6 +185,17 @@ if (import.meta.env.DEV) {
       controls.autoRotate = false;
       moveToPreset(name, true);
     },
+    setCamera(position, target, fov = 30) {
+      const autoRotate = document.querySelector('#autorotate-toggle');
+      autoRotate.checked = false;
+      controls.autoRotate = false;
+      cameraTween = null;
+      camera.position.fromArray(position);
+      controls.target.fromArray(target);
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+      controls.update();
+    },
   };
 }
 
@@ -253,13 +264,13 @@ function loadEnvironment() {
 
 function loadModel() {
   return new Promise((resolve, reject) => {
-    new GLTFLoader().load(
+    new FBXLoader().load(
       MODEL_URL,
-      resolve,
+      (result) => resolve({ scene: result }),
       (event) => {
-        const ratio = event.total ? event.loaded / event.total : Math.min(event.loaded / 14_140_000, 0.94);
+        const ratio = event.total ? event.loaded / event.total : Math.min(event.loaded / 66_018_604, 0.94);
         setProgress('model', ratio);
-        if (ratio > 0.2) setLoadingLabel('Loading 154,600 polygons');
+        if (ratio > 0.2) setLoadingLabel('Loading 2.57m triangles');
       },
       reject,
     );
@@ -280,16 +291,22 @@ function setLoadingLabel(label) {
 
 function installCar(model) {
   car = model;
+  const wwcMaterials = createWwcMaterials();
+  car.scale.setScalar(0.01);
+
   const maxAnisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 12);
   const preparedMaterials = new Set();
   const tireMeshes = [];
 
   car.traverse((object) => {
     if (!object.isMesh) return;
-    object.castShadow = true;
-    object.receiveShadow = true;
+
+    object.material = resolveWwcMaterial(object.name, wwcMaterials);
 
     const materials = Array.isArray(object.material) ? object.material : [object.material];
+    const isOccluder = object.name.startsWith('ShadowPlanes_');
+    object.castShadow = !isOccluder && materials.every((material) => !material?.transparent);
+    object.receiveShadow = !isOccluder;
     if (materials.some((material) => material?.name === 'Tyre')) tireMeshes.push(object);
     materials.forEach((material) => {
       if (!material || preparedMaterials.has(material)) return;
@@ -356,19 +373,21 @@ function prepareMaterial(material, anisotropy) {
     material.map = null;
     material.transmissionMap = null;
     material.roughnessMap = glassDetail;
-    material.color.set('#b9d0d6');
-    material.transmission = 0.72;
-    material.opacity = 0.5;
-    material.transparent = true;
-    material.depthWrite = false;
-    material.roughness = 0.12;
-    material.ior = 1.4;
-    material.thickness = 0.004;
-    material.attenuationColor?.set('#c7dce2');
-    material.attenuationDistance = 8;
-    material.clearcoat = 0;
-    material.specularIntensity = 0.62;
-    material.envMapIntensity = 0.9;
+    material.color.set('#90a4a8');
+    material.transmission = 0.92;
+    material.opacity = 1;
+    material.transparent = false;
+    material.depthWrite = true;
+    material.roughness = 0.065;
+    material.ior = 1.58;
+    material.thickness = 0.0025;
+    material.attenuationColor?.set('#c4d8dc');
+    material.attenuationDistance = 12;
+    material.clearcoat = 0.3;
+    material.clearcoatRoughness = 0.08;
+    material.specularIntensity = 1;
+    material.envMapIntensity = 1.15;
+    material.side = THREE.FrontSide;
   }
 
   if (material.name === 'chrome' || material.name === 'mirrormat') {
@@ -392,6 +411,149 @@ function prepareMaterial(material, anisotropy) {
   }
 
   material.needsUpdate = true;
+}
+
+function createWwcMaterials() {
+  const physical = (name, parameters) => new THREE.MeshPhysicalMaterial({ name, ...parameters });
+  const standard = (name, parameters) => new THREE.MeshStandardMaterial({ name, ...parameters });
+
+  return {
+    body: physical('body', {
+      color: 0xa51420,
+      metalness: 0.08,
+      roughness: 0.26,
+      clearcoat: 1,
+      clearcoatRoughness: 0.06,
+    }),
+    window: physical('window', {
+      color: 0x90a4a8,
+      metalness: 0,
+      roughness: 0.065,
+      transmission: 0.92,
+      opacity: 1,
+      transparent: false,
+      depthWrite: true,
+      ior: 1.58,
+      thickness: 0.0025,
+      clearcoat: 0.3,
+      clearcoatRoughness: 0.08,
+      side: THREE.FrontSide,
+    }),
+    headlights: physical('headlights', {
+      color: 0xf4f6f4,
+      metalness: 0,
+      roughness: 0.1,
+      transmission: 0.74,
+      opacity: 0.46,
+      transparent: true,
+      depthWrite: false,
+      emissive: 0x000000,
+      clearcoat: 1,
+      clearcoatRoughness: 0.08,
+      side: THREE.DoubleSide,
+    }),
+    clearGlass: physical('clear_glass', {
+      color: 0xf3f6f7,
+      metalness: 0,
+      roughness: 0.08,
+      transmission: 0.55,
+      opacity: 0.65,
+      transparent: true,
+      depthWrite: false,
+      clearcoat: 0.7,
+      clearcoatRoughness: 0.1,
+      side: THREE.DoubleSide,
+    }),
+    tailGlass: physical('tail_glass', {
+      color: 0x9f0710,
+      emissive: 0x180002,
+      emissiveIntensity: 0.35,
+      metalness: 0,
+      roughness: 0.2,
+      transmission: 0.14,
+      opacity: 0.88,
+      transparent: true,
+      depthWrite: false,
+      clearcoat: 1,
+      clearcoatRoughness: 0.08,
+    }),
+    orangeGlass: physical('orange_glass', {
+      color: 0xd65a08,
+      emissive: 0x321000,
+      emissiveIntensity: 0.28,
+      metalness: 0,
+      roughness: 0.18,
+      transmission: 0.18,
+      opacity: 0.9,
+      transparent: true,
+      depthWrite: false,
+      clearcoat: 1,
+      clearcoatRoughness: 0.08,
+    }),
+    chrome: standard('chrome', { color: 0xdde2e5, metalness: 1, roughness: 0.12 }),
+    mirror: standard('mirrormat', { color: 0xe8edf0, metalness: 1, roughness: 0.035 }),
+    satinMetal: standard('satin_metal', { color: 0x8d9295, metalness: 0.82, roughness: 0.3 }),
+    gunmetal: standard('gunmetal', { color: 0x292d30, metalness: 0.78, roughness: 0.34 }),
+    rim: standard('outer_rim', { color: 0xb4b6b5, metalness: 0.82, roughness: 0.2 }),
+    tire: standard('Tyre', { color: 0x08090a, metalness: 0, roughness: 0.84 }),
+    brakeDisc: standard('brake_disc', { color: 0x666b6d, metalness: 0.9, roughness: 0.3 }),
+    caliper: standard('caliper', { color: 0xe5b416, metalness: 0.18, roughness: 0.3 }),
+    rubber: standard('rubber', { color: 0x090a0b, metalness: 0, roughness: 0.78 }),
+    blackPlastic: standard('black_plastic', { color: 0x0c0d0f, metalness: 0, roughness: 0.58 }),
+    ruggedPlastic: standard('rugged_plastic', { color: 0x101113, metalness: 0, roughness: 0.82 }),
+    colorPlastic: standard('color_plastic', { color: 0x3a332f, metalness: 0, roughness: 0.52 }),
+    redPlastic: standard('red_plastic', { color: 0x8d1019, metalness: 0, roughness: 0.48 }),
+    blackLeather: physical('black_leather', { color: 0x0d0d0e, metalness: 0, roughness: 0.62, sheen: 0.18 }),
+    colorLeather: physical('color_leather', { color: 0x49413b, metalness: 0, roughness: 0.54, sheen: 0.22 }),
+    silverLeather: physical('silver_leather', { color: 0x7e7c77, metalness: 0, roughness: 0.56, sheen: 0.2 }),
+    whiteLeather: physical('white_leather', { color: 0xb4aea4, metalness: 0, roughness: 0.58, sheen: 0.18 }),
+    carpet: standard('carpet', { color: 0x09090a, metalness: 0, roughness: 0.96 }),
+    belts: standard('seat_belts', { color: 0x191a1c, metalness: 0, roughness: 0.72 }),
+    decalGlossy: physical('decal_glossy', { color: 0x090a0b, metalness: 0, roughness: 0.24, clearcoat: 0.5 }),
+    decalSatin: standard('decal_satin', { color: 0x17191b, metalness: 0, roughness: 0.6 }),
+    plate: standard('license_plate', { color: 0xd5d3c9, metalness: 0.02, roughness: 0.48 }),
+    occluder: standard('cavity_occluder', {
+      color: 0x030304,
+      metalness: 0,
+      roughness: 1,
+      envMapIntensity: 0,
+      side: THREE.DoubleSide,
+    }),
+    default: standard('wwc_default', { color: 0x26282a, metalness: 0.15, roughness: 0.48 }),
+  };
+}
+
+function resolveWwcMaterial(name, materials) {
+  if (name.startsWith('ShadowPlanes_')) return materials.occluder;
+  if (name.startsWith('Paint_')) return materials.body;
+  if (name.startsWith('GlassWindows_')) return materials.window;
+  if (name === 'GlassHL_HL') return materials.headlights;
+  if (name.startsWith('GlassHL_TL_') || name.startsWith('GlassRed_') || name.startsWith('GlassReflector_')) return materials.tailGlass;
+  if (name.startsWith('GlassOrange_')) return materials.orangeGlass;
+  if (name.startsWith('GlassClear_')) return materials.clearGlass;
+  if (name.startsWith('Mirrors_')) return materials.mirror;
+  if (name.startsWith('MetalChrome_') || name.startsWith('Metal_')) return materials.chrome;
+  if (name.startsWith('MetalSatin_')) return materials.satinMetal;
+  if (name.startsWith('Gunmetal_')) return materials.gunmetal;
+  if (name.startsWith('Rims_')) return materials.rim;
+  if (name.startsWith('Tires_')) return materials.tire;
+  if (name.startsWith('BrakeDisc_')) return materials.brakeDisc;
+  if (name.startsWith('Calipers_')) return materials.caliper;
+  if (name.startsWith('Rubber_')) return materials.rubber;
+  if (name.startsWith('PlasticBlack_')) return materials.blackPlastic;
+  if (name.startsWith('PlasticRugged_')) return materials.ruggedPlastic;
+  if (name.startsWith('PlasticColor_')) return materials.colorPlastic;
+  if (name.startsWith('PlasticRed_')) return materials.redPlastic;
+  if (name.startsWith('LeatherBlack_')) return materials.blackLeather;
+  if (name.startsWith('LeatherColor_')) return materials.colorLeather;
+  if (name.startsWith('LeatherSilver_')) return materials.silverLeather;
+  if (name.startsWith('LeatherWhite_')) return materials.whiteLeather;
+  if (name.startsWith('Carpet_')) return materials.carpet;
+  if (name === 'Seat_belts') return materials.belts;
+  if (name.startsWith('DecalGlossy_')) return materials.decalGlossy;
+  if (name.startsWith('DecalSatin_')) return materials.decalSatin;
+  if (name === 'License_plates') return materials.plate;
+  return materials.default;
 }
 
 function createStage() {

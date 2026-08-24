@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "setup:model": "node scripts/setup-model.mjs",
     "test:smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {

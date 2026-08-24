@@ -1,15 +1,14 @@
 # Asset attribution
 
-## Porsche 959 model
+## Porsche 959 model—not included
 
-- Title: **Porsche 959**
-- Creator: **Yakpower** (`Alexios_Apokaukos`)
-- Original source: https://sketchfab.com/3d-models/porsche-959-0530aa8fa4b74427a71c961a5bdd7087
-- License: [Creative Commons Attribution-ShareAlike 4.0 International](https://creativecommons.org/licenses/by-sa/4.0/)
-- Local file: `public/models/porsche-959.glb`
-- Retrieval: exact Sketchfab UID from the public [Objaverse](https://huggingface.co/datasets/allenai/objaverse) mirror.
+- Title: **1987 Porsche 959**
+- Source/rightsholder: **Wire Wheels Club / Luis Lara**
+- Original source: https://wirewheelsclub.com/models/1987-porsche-959/
+- Terms: https://wirewheelsclub.com/license/
+- Expected local file: `public/models/wwc/87_porsche_959_WWC.fbx`
 
-The model binary is distributed unmodified. Runtime material parameters can be changed interactively by the viewer; shared adaptations of the model remain subject to CC BY-SA 4.0.
+The FBX is intentionally excluded from this repository. Each user must download it directly from Wire Wheels Club and run `npm run setup:model -- /path/to/006_porsche_959_wwc.zip`. The runtime assigns custom physically based materials without modifying the source FBX.
 
 ## Trademark notice
 

@@ -59,7 +59,10 @@ try {
   page.on('requestfailed', (request) => failures.push(`request: ${request.url()} — ${request.failure()?.errorText}`));
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('body.is-ready', { timeout: 60_000 });
+  // The WWC FBX is 2.57m triangles. Select balanced mode before shader compilation
+  // so the software-rendered CI check remains practical.
+  await page.evaluate(() => document.querySelector('[data-quality="balanced"]').click());
+  await page.waitForSelector('body.is-ready', { timeout: 240_000 });
   await page.waitForTimeout(1500);
 
   const state = await page.evaluate(() => ({
@@ -73,12 +76,10 @@ try {
   if (!state.ready) failures.push('viewer did not reach its ready state');
   if (state.activeView !== 'HERO') failures.push(`view: expected HERO, got ${state.activeView}`);
 
-  // SwiftShader is far slower than a real GPU; balanced mode keeps visual checks practical.
-  await page.evaluate(() => document.querySelector('[data-quality="balanced"]').click());
   await page.waitForTimeout(600);
   await page.screenshot({ path: 'viewer-smoke.png', fullPage: true, timeout: 90_000 });
 
-  const downloadPromise = page.waitForEvent('download');
+  const downloadPromise = page.waitForEvent('download', { timeout: 120_000 });
   await page.locator('#capture-button').click();
   const download = await downloadPromise;
   const downloadPath = await download.path();
@@ -93,6 +94,8 @@ try {
   await page.locator('#credits-button').click();
   const legalNotice = await page.locator('.credits-card__legal').textContent();
   if (!legalNotice?.includes('not associated or otherwise affiliated')) failures.push('trademark disclaimer is missing');
+  const credits = await page.locator('#credits-card').textContent();
+  if (!credits?.includes('Wire Wheels Club')) failures.push('WWC model attribution is missing');
   await page.locator('#credits-close').click();
 
   await page.locator('#settings-button').click();
