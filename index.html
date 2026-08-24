@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#08090a" />
+    <meta
+      name="description"
+      content="An interactive, real-time Porsche 959 visualization rendered in the browser."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>Porsche 959 — Realtime Study</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="scene" aria-label="Interactive 3D visualization of a Porsche 959"></canvas>
+
+      <div class="vignette" aria-hidden="true"></div>
+      <div class="grain" aria-hidden="true"></div>
+
+      <header class="topbar chrome-ui">
+        <a class="wordmark" href="#" aria-label="Return to hero view" data-camera="hero">
+          <span class="wordmark__eyebrow">PORSCHE</span>
+          <span class="wordmark__model">959</span>
+        </a>
+
+        <div class="topbar__center" aria-hidden="true">
+          <span>Realtime study</span>
+          <i></i>
+          <span id="render-status">PBR / HIGH</span>
+        </div>
+
+        <div class="topbar__actions">
+          <button class="icon-button" id="capture-button" type="button" aria-label="Save a high-quality image" data-tooltip="Save image">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.6 5.5 10 3.8h4l1.4 1.7H19a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7.5a2 2 0 0 1 2-2h3.6Z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+          </button>
+          <button class="icon-button" id="fullscreen-button" type="button" aria-label="Enter fullscreen" data-tooltip="Fullscreen">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
+          </button>
+          <button class="menu-button" id="settings-button" type="button" aria-expanded="false" aria-controls="settings-panel">
+            <span>Configure</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <aside class="spec-rail chrome-ui" aria-label="Model details">
+        <div><span>MODEL</span><strong>959</strong></div>
+        <div><span>FORM</span><strong>COUPÉ</strong></div>
+        <div><span>VIEW</span><strong id="active-view-label">HERO</strong></div>
+      </aside>
+
+      <section class="settings chrome-ui" id="settings-panel" aria-label="Visualization settings" aria-hidden="true">
+        <div class="settings__head">
+          <div>
+            <span class="panel-kicker">CONFIGURATION</span>
+            <h2>Make it yours</h2>
+          </div>
+          <button class="icon-button settings__close" id="settings-close" type="button" aria-label="Close settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+
+        <div class="settings__group">
+          <div class="setting-label"><span>Exterior paint</span><output id="paint-name">Guards Red</output></div>
+          <div class="swatches" role="radiogroup" aria-label="Exterior paint">
+            <button class="swatch is-active" type="button" data-color="#a51420" data-metalness="0.08" data-paint="Guards Red" style="--swatch:#b51f2a" role="radio" aria-checked="true" aria-label="Guards Red"></button>
+            <button class="swatch" type="button" data-color="#a5a8a8" data-metalness="0.58" data-paint="Silver Metallic" style="--swatch:#b8bab8" role="radio" aria-checked="false" aria-label="Silver Metallic"></button>
+            <button class="swatch" type="button" data-color="#0b0c0e" data-metalness="0.12" data-paint="Basalt Black" style="--swatch:#111316" role="radio" aria-checked="false" aria-label="Basalt Black"></button>
+            <button class="swatch" type="button" data-color="#d9d5ca" data-metalness="0.04" data-paint="Grand Prix White" style="--swatch:#f0ede5" role="radio" aria-checked="false" aria-label="Grand Prix White"></button>
+            <button class="swatch" type="button" data-color="#1b2c46" data-metalness="0.22" data-paint="Night Blue" style="--swatch:#28394f" role="radio" aria-checked="false" aria-label="Night Blue"></button>
+          </div>
+        </div>
+
+        <div class="settings__group controls-stack">
+          <label class="range-control" for="exposure">
+            <span class="setting-label"><span>Exposure</span><output id="exposure-value">0.88</output></span>
+            <input id="exposure" type="range" min="0.6" max="1.35" step="0.01" value="0.88" />
+          </label>
+          <label class="range-control" for="studio-rotation">
+            <span class="setting-label"><span>Studio rotation</span><output id="rotation-value">18°</output></span>
+            <input id="studio-rotation" type="range" min="-180" max="180" step="1" value="18" />
+          </label>
+        </div>
+
+        <div class="settings__group toggle-list">
+          <label class="toggle-row">
+            <span><strong>Headlights</strong><small>Physical beam &amp; bloom</small></span>
+            <input id="headlights-toggle" type="checkbox" />
+            <i aria-hidden="true"></i>
+          </label>
+          <label class="toggle-row">
+            <span><strong>Auto orbit</strong><small>Slow showroom rotation</small></span>
+            <input id="autorotate-toggle" type="checkbox" checked />
+            <i aria-hidden="true"></i>
+          </label>
+        </div>
+
+        <div class="settings__group quality-setting">
+          <div class="setting-label"><span>Render quality</span><output id="quality-value">Auto</output></div>
+          <div class="segmented" role="radiogroup" aria-label="Render quality">
+            <button class="is-active" type="button" data-quality="auto" role="radio" aria-checked="true">Auto</button>
+            <button type="button" data-quality="balanced" role="radio" aria-checked="false">Balanced</button>
+            <button type="button" data-quality="ultra" role="radio" aria-checked="false">Ultra</button>
+          </div>
+        </div>
+      </section>
+
+      <nav class="camera-nav chrome-ui" aria-label="Camera views">
+        <button class="is-active" type="button" data-camera="hero"><span>01</span> Hero</button>
+        <button type="button" data-camera="front"><span>02</span> Front</button>
+        <button type="button" data-camera="profile"><span>03</span> Profile</button>
+        <button type="button" data-camera="rear"><span>04</span> Rear</button>
+        <button type="button" data-camera="cockpit"><span>05</span> Cockpit</button>
+      </nav>
+
+      <div class="interaction-hint chrome-ui" id="interaction-hint" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 2v5M12 17v5M4.9 4.9l3.5 3.5M15.6 15.6l3.5 3.5M2 12h5M17 12h5M4.9 19.1l3.5-3.5M15.6 8.4l3.5-3.5"/><circle cx="12" cy="12" r="3"/></svg>
+        <span>Drag to orbit <i>·</i> Scroll to zoom</span>
+      </div>
+
+      <footer class="footer chrome-ui">
+        <button class="credits-button" id="credits-button" type="button" aria-expanded="false" aria-controls="credits-card">
+          <span>3D asset credits</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+        </button>
+        <p>WebGL <i></i> Realtime PBR</p>
+      </footer>
+
+      <aside class="credits-card chrome-ui" id="credits-card" aria-hidden="true">
+        <button class="credits-card__close" id="credits-close" type="button" aria-label="Close credits">×</button>
+        <span class="panel-kicker">ASSET ATTRIBUTION</span>
+        <h2>Porsche 959</h2>
+        <p>3D model by <a href="https://sketchfab.com/Alexios_Apokaukos" target="_blank" rel="noreferrer">Yakpower</a>, provided via <a href="https://sketchfab.com/3d-models/porsche-959-0530aa8fa4b74427a71c961a5bdd7087" target="_blank" rel="noreferrer">Sketchfab</a>.</p>
+        <p>Licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noreferrer">CC BY-SA 4.0</a>. Studio HDRI “Studio Small 09” by Poly Haven, CC0.</p>
+      </aside>
+
+      <div class="loading" id="loading-screen" role="status" aria-live="polite">
+        <div class="loading__halo" aria-hidden="true"></div>
+        <div class="loading__content">
+          <span class="loading__brand">PORSCHE</span>
+          <strong>959</strong>
+          <div class="loading__progress"><i id="loading-progress"></i></div>
+          <div class="loading__meta"><span id="loading-label">Loading model</span><output id="loading-percent">0%</output></div>
+        </div>
+      </div>
+
+      <div class="error-state" id="error-state" role="alert" hidden>
+        <span>Rendering unavailable</span>
+        <h2>This experience needs WebGL 2.</h2>
+        <p>Try a current version of Chrome, Edge, Firefox, or Safari with hardware acceleration enabled.</p>
+      </div>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
