@@ -11,7 +11,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import './style.css';
 
-const MODEL_URL = `${import.meta.env.BASE_URL}models/wwc/87_porsche_959_WWC.fbx`;
+const MODEL_META = __P959_MODEL_META__;
+const MODEL_URL = `${import.meta.env.BASE_URL}${MODEL_META.publicPath}`;
 const ENVIRONMENT_URL = `${import.meta.env.BASE_URL}environment/studio-small-09-2k.hdr`;
 
 const canvas = document.querySelector('#scene');
@@ -176,6 +177,7 @@ configureQuality('auto', false);
 setupInterface();
 resize();
 window.addEventListener('resize', resize, { passive: true });
+canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
 if (import.meta.env.DEV) {
   window.__P959_DEBUG__ = {
@@ -205,7 +207,7 @@ loadExperience();
 async function loadExperience() {
   try {
     setLoadingLabel('Lighting the studio');
-    const [environment, gltf] = await Promise.all([
+    const [environment, model] = await Promise.all([
       loadEnvironment(),
       loadModel(),
     ]);
@@ -217,7 +219,7 @@ async function loadExperience() {
     scene.environment = environmentMap;
     pmremGenerator.dispose();
 
-    installCar(gltf.scene);
+    installCar(model.scene);
     setStudioRotation(18);
     setLoadingLabel('Compiling materials');
     setProgress('model', 0.96);
@@ -244,7 +246,7 @@ async function loadExperience() {
     document.querySelector('#loading-screen').hidden = true;
     errorState.hidden = false;
     errorState.querySelector('h2').textContent = 'The 3D assets could not be loaded.';
-    errorState.querySelector('p').textContent = 'Check the local server and refresh the page.';
+    errorState.querySelector('p').textContent = 'Check the protected model setup and refresh the page.';
   }
 }
 
@@ -262,17 +264,107 @@ function loadEnvironment() {
   });
 }
 
-function loadModel() {
+async function loadModel() {
+  setLoadingLabel('Downloading protected model');
+  const encryptedPayload = await fetchProtectedModel();
+  setProgress('model', 0.74);
+  let source = await decryptProtectedModel(encryptedPayload);
+  setProgress('model', 0.88);
+  setLoadingLabel('Building 2.57m triangles');
+
+  // Let the loading UI paint before the necessarily synchronous FBX parse.
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  const result = new FBXLoader().parse(source, '');
+  source = null;
+  setProgress('model', 0.94);
+  return { scene: result };
+}
+
+async function fetchProtectedModel() {
+  const response = await fetch(MODEL_URL, {
+    cache: 'force-cache',
+    credentials: 'same-origin',
+  });
+  if (!response.ok) {
+    throw new Error(`Protected model request failed (${response.status}).`);
+  }
+
+  const expectedBytes = MODEL_META.payloadBytes;
+  if (!response.body) {
+    const payload = await response.arrayBuffer();
+    if (payload.byteLength !== expectedBytes) throw new Error('Protected model download is incomplete.');
+    setProgress('model', 0.72);
+    return payload;
+  }
+
+  const reader = response.body.getReader();
+  const payload = new Uint8Array(expectedBytes);
+  let receivedBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (receivedBytes + value.byteLength > payload.byteLength) {
+      await reader.cancel();
+      throw new Error('Protected model download is larger than expected.');
+    }
+    payload.set(value, receivedBytes);
+    receivedBytes += value.byteLength;
+    const downloadRatio = receivedBytes / expectedBytes;
+    setProgress('model', downloadRatio * 0.72);
+    if (downloadRatio > 0.12) setLoadingLabel('Loading protected geometry');
+  }
+
+  if (receivedBytes !== expectedBytes) throw new Error('Protected model download is incomplete.');
+  return payload.buffer;
+}
+
+function decodeBase64(value) {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function decryptProtectedModel(payload) {
+  const worker = new Worker(new URL('./model-decrypt.worker.js', import.meta.url), { type: 'module' });
+  const keyShareA = decodeBase64(__P959_MODEL_KEY_SHARE_A__);
+
   return new Promise((resolve, reject) => {
-    new FBXLoader().load(
-      MODEL_URL,
-      (result) => resolve({ scene: result }),
-      (event) => {
-        const ratio = event.total ? event.loaded / event.total : Math.min(event.loaded / 66_018_604, 0.94);
-        setProgress('model', ratio);
-        if (ratio > 0.2) setLoadingLabel('Loading 2.57m triangles');
+    const finish = () => worker.terminate();
+
+    worker.onmessage = (event) => {
+      if (event.data.type === 'phase') {
+        if (event.data.phase === 'decrypting') {
+          setLoadingLabel('Unlocking model');
+          setProgress('model', 0.78);
+        } else if (event.data.phase === 'decompressing') {
+          setLoadingLabel('Expanding geometry');
+          setProgress('model', 0.83);
+        }
+        return;
+      }
+
+      if (event.data.type === 'complete') {
+        finish();
+        resolve(event.data.payload);
+        return;
+      }
+
+      finish();
+      reject(new Error(event.data.message ?? 'Protected model could not be unlocked.'));
+    };
+
+    worker.onerror = (event) => {
+      finish();
+      reject(new Error(event.message || 'Protected model worker failed.'));
+    };
+
+    worker.postMessage(
+      {
+        payload,
+        keyShareA: keyShareA.buffer,
+        expectedBytes: MODEL_META.sourceBytes,
       },
-      reject,
+      [payload, keyShareA.buffer],
     );
   });
 }

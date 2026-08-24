@@ -3,4 +3,6 @@ dist/
 viewer-smoke.png
 viewer-mobile-smoke.png
 viewer-profile-smoke.png
+local-models/
 public/models/wwc/
+public/models/protected/

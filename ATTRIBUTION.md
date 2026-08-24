@@ -6,9 +6,9 @@
 - Source/rightsholder: **Wire Wheels Club / Luis Lara**
 - Original source: https://wirewheelsclub.com/models/1987-porsche-959/
 - Terms: https://wirewheelsclub.com/license/
-- Expected local file: `public/models/wwc/87_porsche_959_WWC.fbx`
+- Expected local source: `local-models/wwc/87_porsche_959_WWC.fbx`
 
-The FBX is intentionally excluded from this repository. Each user must download it directly from Wire Wheels Club and run `npm run setup:model -- /path/to/006_porsche_959_wwc.zip`. The runtime assigns custom physically based materials without modifying the source FBX.
+The FBX and generated encrypted payload are intentionally excluded from this repository. Each user must download the model directly from Wire Wheels Club and run `npm run setup:model -- /path/to/006_porsche_959_wwc.zip`. The runtime assigns custom physically based materials without modifying the source FBX.
 
 ## Trademark notice
 

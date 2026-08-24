@@ -14,7 +14,13 @@ npm run dev
 
 Open the URL shown by Vite. Production output can be generated with `npm run build` and served with `npm run preview`.
 
-The site is entirely static. The setup command extracts the FBX and its license into the Git-ignored `public/models/wwc/` directory. It requires the standard `unzip` command; alternatively, manually extract `FBX/87_porsche_959_WWC.fbx` there.
+The setup command keeps the plaintext FBX and its license under the Git-ignored `local-models/wwc/` directory. It then gzip-compresses the FBX, encrypts it with AES-256-GCM, and writes only a content-addressed `.p9e` payload beneath the Git-ignored `public/models/protected/` directory. The standard `unzip` command is required for initial setup.
+
+`npm run dev` and `npm run build` automatically verify that the protected payload matches the local source model. To rotate the generated key and payload, run:
+
+```bash
+npm run protect:model -- --force
+```
 
 ## Deploy to a static server
 
@@ -25,9 +31,11 @@ npm run build
 
 Upload the **contents of `dist/`** to the desired directory on the web server. Node.js is only needed during the build; the deployed site has no server-side runtime, database, environment variables, or external model requests. The build uses relative asset paths, so it works at either a domain root such as `https://example.com/` or a subdirectory such as `https://example.com/porsh/`.
 
-Serve the files over HTTP(S), not directly from a `file://` URL. No single-page-app fallback rules are needed because the viewer has no client-side routes.
+Serve production deployments over HTTPS because browser decryption uses Web Crypto; Vite's local HTTP origin is also accepted by browsers as a secure context. Do not open the build directly from a `file://` URL. No single-page-app fallback rules are needed because the viewer has no client-side routes. The server may serve `.p9e` as `application/octet-stream`; enable that MIME type if a host rejects unknown extensions. The hashed payload can safely receive a long-lived immutable cache header.
 
-Important: `npm run build` copies the locally installed FBX into `dist/`. Wire Wheels Club permits use but restricts sharing and distribution of the model. Obtain any permission needed before publishing a build containing it; see [their license](https://wirewheelsclub.com/license/).
+At runtime, a Web Worker reconstructs the split key, authenticates and decrypts the payload, decompresses it, and gives the resulting bytes to Three.js without making a plaintext FBX request. The production bundle does not contain a `.fbx` file.
+
+This is obfuscation, not DRM: because the browser must eventually receive the key and geometry, a determined user can still recover the model from memory or instrument the loader. Encryption does not grant publication rights or override the [Wire Wheels Club license](https://wirewheelsclub.com/license/). Obtain written permission before publishing any build containing the protected model payload.
 
 ## Controls
 

@@ -47,16 +47,19 @@ try {
       '--enable-webgl',
       '--ignore-gpu-blocklist',
       '--use-angle=swiftshader',
+      '--disable-dev-shm-usage',
     ],
   });
 
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
   const failures = [];
+  const assetRequests = [];
   page.on('console', (message) => {
     if (message.type() === 'error') failures.push(`console: ${message.text()}`);
   });
   page.on('pageerror', (error) => failures.push(`page: ${error.message}`));
   page.on('requestfailed', (request) => failures.push(`request: ${request.url()} — ${request.failure()?.errorText}`));
+  page.on('request', (request) => assetRequests.push(request.url()));
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   // The WWC FBX is 2.57m triangles. Select balanced mode before shader compilation
@@ -75,6 +78,8 @@ try {
   if (state.canvasWidth < 1000 || state.canvasHeight < 600) failures.push(`canvas: unexpected dimensions ${state.canvasWidth}x${state.canvasHeight}`);
   if (!state.ready) failures.push('viewer did not reach its ready state');
   if (state.activeView !== 'HERO') failures.push(`view: expected HERO, got ${state.activeView}`);
+  if (!assetRequests.some((requestUrl) => requestUrl.endsWith('.p9e'))) failures.push('protected model payload was not requested');
+  if (assetRequests.some((requestUrl) => requestUrl.toLowerCase().endsWith('.fbx'))) failures.push('plaintext FBX was requested');
 
   await page.waitForTimeout(600);
   await page.screenshot({ path: 'viewer-smoke.png', fullPage: true, timeout: 90_000 });

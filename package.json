@@ -4,13 +4,19 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "predev": "npm run protect:model",
     "dev": "vite",
+    "prebuild": "npm run protect:model",
     "build": "vite build",
     "preview": "vite preview",
     "setup:model": "node scripts/setup-model.mjs",
+    "protect:model": "node scripts/protect-model.mjs",
+    "test:protection": "node scripts/verify-model-protection.mjs",
+    "pretest:smoke": "npm run protect:model",
     "test:smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
+    "fflate": "^0.8.2",
     "three": "0.185.1"
   },
   "devDependencies": {
