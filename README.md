@@ -1,20 +1,24 @@
 # Porsche 959 — realtime study
 
-A high-quality, browser-based Three.js presentation of Wire Wheels Club's 1987 Porsche 959 model. It uses an HDR studio, custom PBR materials, transmission/clearcoat, soft dynamic shadows, GTAO, bloom, adaptive resolution, animated camera presets, paint configuration, lights, fullscreen, and lossless screenshot capture.
+A high-quality, browser-based Three.js presentation of Wire Wheels Club's advanced 1987 Porsche 959 model. It uses the model's authored PBR texture set, an HDR studio, transmission/clearcoat, soft dynamic shadows, GTAO, bloom, adaptive resolution, animated camera presets, paint configuration, lights, fullscreen, and lossless screenshot capture.
 
 ## Run locally
 
-First download `006_porsche_959_wwc.zip` from [Wire Wheels Club](https://wirewheelsclub.com/models/1987-porsche-959/). The model is intentionally not distributed in this repository.
+Purchase and download the advanced model archive, `WireWheelsClub_87_POR_959_v2_ADV.zip`, from [Wire Wheels Club](https://wirewheelsclub.com/models/1987-porsche-959/). The model and its textures are intentionally not distributed in this repository.
+
+The one-time texture preparation requires `unzip` and the `toktx` executable from [Khronos KTX-Software](https://github.com/KhronosGroup/ktx-software) 4.4.2 or newer. Put `toktx` on `PATH` or set `P959_TOKTX=/absolute/path/to/toktx`.
 
 ```bash
 npm ci
-npm run setup:model -- ~/Downloads/006_porsche_959_wwc.zip
+npm run setup:model -- ~/Downloads/WireWheelsClub_87_POR_959_v2_ADV.zip
 npm run dev
 ```
 
 Open the URL shown by Vite. Production output can be generated with `npm run build` and served with `npm run preview`.
 
-The setup command keeps the plaintext FBX and its license under the Git-ignored `local-models/wwc/` directory. It then gzip-compresses the FBX, encrypts it with AES-256-GCM, and writes only a content-addressed `.p9e` payload beneath the Git-ignored `public/models/protected/` directory. The standard `unzip` command is required for initial setup.
+The setup command keeps the plaintext FBX, source textures, and local license under the Git-ignored `local-models/wwc-advanced/` directory. It prepares 54 GPU-compressed KTX2/UASTC maps with mipmaps, bundles them with the FBX, and authenticates/encrypts the bundle with AES-256-GCM. Only a content-addressed `.p9e` payload is written beneath the Git-ignored `public/models/protected/` directory.
+
+The first setup is CPU-intensive because it encodes the full texture set. Later runs reuse the prepared maps. Use `npm run setup:model -- /path/to/archive.zip --rebuild-textures` only when you intentionally want to regenerate every KTX2 map.
 
 `npm run dev` and `npm run build` automatically verify that the protected payload matches the local source model. To rotate the generated key and payload, run:
 
@@ -33,9 +37,9 @@ Upload the **contents of `dist/`** to the desired directory on the web server. N
 
 Serve production deployments over HTTPS because browser decryption uses Web Crypto; Vite's local HTTP origin is also accepted by browsers as a secure context. Do not open the build directly from a `file://` URL. No single-page-app fallback rules are needed because the viewer has no client-side routes. The server may serve `.p9e` as `application/octet-stream`; enable that MIME type if a host rejects unknown extensions. The hashed payload can safely receive a long-lived immutable cache header.
 
-At runtime, a Web Worker reconstructs the split key, authenticates and decrypts the payload, decompresses it, and gives the resulting bytes to Three.js without making a plaintext FBX request. The production bundle does not contain a `.fbx` file.
+At runtime, a Web Worker reconstructs the split key, authenticates and decrypts the payload, and unpacks the model and textures in memory. Three.js transcodes the KTX2 maps directly to a GPU-supported compressed format. The browser never makes a plaintext FBX or texture request, and the production build does not contain standalone `.fbx`, `.jpg`, `.png`, or `.ktx2` files.
 
-This is obfuscation, not DRM: because the browser must eventually receive the key and geometry, a determined user can still recover the model from memory or instrument the loader. Encryption does not grant publication rights or override the [Wire Wheels Club license](https://wirewheelsclub.com/license/). Obtain written permission before publishing any build containing the protected model payload.
+This is obfuscation, not DRM: because the browser must eventually receive the key, geometry, and textures, a determined user can still recover the assets from memory or instrument the loader. Encryption does not grant publication rights or override the purchased model's license. Review the license included with your archive and the [Wire Wheels Club license page](https://wirewheelsclub.com/license/) before publishing a build containing the protected payload.
 
 ## Controls
 

@@ -16,7 +16,6 @@
     "test:smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
-    "fflate": "^0.8.2",
     "three": "0.185.1"
   },
   "devDependencies": {

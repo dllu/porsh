@@ -2,13 +2,13 @@
 
 ## Porsche 959 model—not included
 
-- Title: **1987 Porsche 959**
+- Title: **1987 Porsche 959 — advanced model**
 - Source/rightsholder: **Wire Wheels Club / Luis Lara**
 - Original source: https://wirewheelsclub.com/models/1987-porsche-959/
 - Terms: https://wirewheelsclub.com/license/
-- Expected local source: `local-models/wwc/87_porsche_959_WWC.fbx`
+- Expected local source: `local-models/wwc-advanced/87_POR_959_wwc_ADV_v2.fbx`
 
-The FBX and generated encrypted payload are intentionally excluded from this repository. Each user must download the model directly from Wire Wheels Club and run `npm run setup:model -- /path/to/006_porsche_959_wwc.zip`. The runtime assigns custom physically based materials without modifying the source FBX.
+The FBX, authored texture maps, local license, converted KTX2 maps, and generated encrypted payload are intentionally excluded from this repository. Each user must purchase/download the advanced model directly from Wire Wheels Club and run `npm run setup:model -- /path/to/WireWheelsClub_87_POR_959_v2_ADV.zip`. The runtime applies the supplied UV-mapped PBR textures without modifying the source FBX.
 
 ## Trademark notice
 

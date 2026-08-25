@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -220,7 +221,7 @@ async function loadExperience() {
     scene.environment = environmentMap;
     pmremGenerator.dispose();
 
-    installCar(model.scene);
+    installCar(model.scene, model.textures);
     setStudioRotation(18);
     setLoadingLabel('Compiling materials');
     setProgress('model', 0.96);
@@ -268,17 +269,58 @@ function loadEnvironment() {
 async function loadModel() {
   setLoadingLabel('Downloading protected model');
   const encryptedPayload = await fetchProtectedModel();
-  setProgress('model', 0.74);
-  let source = await decryptProtectedModel(encryptedPayload);
-  setProgress('model', 0.88);
-  setLoadingLabel('Building 2.57m triangles');
+  setProgress('model', 0.63);
+  const bundle = await decryptProtectedModel(encryptedPayload);
+  setProgress('model', 0.7);
+
+  const textures = await loadMaterialTextures(bundle.textures);
+  setProgress('model', 0.89);
+  setLoadingLabel('Building 2.19m triangles');
 
   // Let the loading UI paint before the necessarily synchronous FBX parse.
   await new Promise((resolve) => requestAnimationFrame(resolve));
-  const result = new FBXLoader().parse(source, '');
-  source = null;
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier(() => 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=');
+  const result = new FBXLoader(manager).parse(bundle.model, '');
+  bundle.model = null;
   setProgress('model', 0.94);
-  return { scene: result };
+  return { scene: result, textures };
+}
+
+async function loadMaterialTextures(textureAssets) {
+  if (textureAssets.length !== MODEL_META.textureCount) {
+    throw new Error('Protected material texture set is incomplete.');
+  }
+
+  setLoadingLabel(`Transcoding ${textureAssets.length} PBR maps`);
+  const loader = new KTX2Loader()
+    .setTranscoderPath(import.meta.env.DEV ? `${import.meta.env.BASE_URL}basis/` : '')
+    .setWorkerLimit(Math.min(navigator.hardwareConcurrency || 4, 4))
+    .detectSupport(renderer);
+  const textures = new Map();
+  let loadedTextures = 0;
+
+  try {
+    await Promise.all(textureAssets.map((asset) => new Promise((resolve, reject) => {
+      loader.parse(
+        asset.payload,
+        (texture) => {
+          texture.name = asset.name;
+          texture.flipY = false;
+          texture.userData.role = asset.role;
+          textures.set(asset.name, texture);
+          loadedTextures += 1;
+          setProgress('model', 0.7 + (loadedTextures / textureAssets.length) * 0.18);
+          resolve();
+        },
+        reject,
+      );
+    })));
+  } finally {
+    loader.dispose();
+  }
+
+  return textures;
 }
 
 async function fetchProtectedModel() {
@@ -294,7 +336,7 @@ async function fetchProtectedModel() {
   if (!response.body) {
     const payload = await response.arrayBuffer();
     if (payload.byteLength !== expectedBytes) throw new Error('Protected model download is incomplete.');
-    setProgress('model', 0.72);
+    setProgress('model', 0.61);
     return payload;
   }
 
@@ -312,8 +354,8 @@ async function fetchProtectedModel() {
     payload.set(value, receivedBytes);
     receivedBytes += value.byteLength;
     const downloadRatio = receivedBytes / expectedBytes;
-    setProgress('model', downloadRatio * 0.72);
-    if (downloadRatio > 0.12) setLoadingLabel('Loading protected geometry');
+    setProgress('model', downloadRatio * 0.61);
+    if (downloadRatio > 0.08) setLoadingLabel('Loading protected geometry and materials');
   }
 
   if (receivedBytes !== expectedBytes) throw new Error('Protected model download is incomplete.');
@@ -336,17 +378,17 @@ function decryptProtectedModel(payload) {
       if (event.data.type === 'phase') {
         if (event.data.phase === 'decrypting') {
           setLoadingLabel('Unlocking model');
-          setProgress('model', 0.78);
-        } else if (event.data.phase === 'decompressing') {
-          setLoadingLabel('Expanding geometry');
-          setProgress('model', 0.83);
+          setProgress('model', 0.64);
+        } else if (event.data.phase === 'unpacking') {
+          setLoadingLabel('Unpacking materials');
+          setProgress('model', 0.67);
         }
         return;
       }
 
       if (event.data.type === 'complete') {
         finish();
-        resolve(event.data.payload);
+        resolve({ model: event.data.model, textures: event.data.textures });
         return;
       }
 
@@ -382,10 +424,10 @@ function setLoadingLabel(label) {
   loadingLabel.textContent = label;
 }
 
-function installCar(model) {
+function installCar(model, textures) {
   car = model;
-  const wwcMaterials = createWwcMaterials();
-  car.scale.setScalar(0.01);
+  const wwcMaterials = createAdvancedMaterials(textures);
+  car.scale.setScalar(MODEL_META.modelScale ?? 1);
 
   const maxAnisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 12);
   const preparedMaterials = new Set();
@@ -394,18 +436,22 @@ function installCar(model) {
   car.traverse((object) => {
     if (!object.isMesh) return;
 
-    object.material = resolveWwcMaterial(object.name, wwcMaterials);
+    const sourceMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    const resolvedMaterials = sourceMaterials.map((material) => (
+      wwcMaterials.get(material?.name) ?? wwcMaterials.get('default')
+    ));
+    object.material = Array.isArray(object.material) ? resolvedMaterials : resolvedMaterials[0];
 
-    const materials = Array.isArray(object.material) ? object.material : [object.material];
-    const isOccluder = object.name.startsWith('ShadowPlanes_');
-    object.castShadow = !isOccluder && materials.every((material) => !material?.transparent);
+    const isOccluder = resolvedMaterials.some((material) => material.name === 'shadow-planes');
+    object.castShadow = !isOccluder && resolvedMaterials.every((material) => !material.transparent);
     object.receiveShadow = !isOccluder;
-    if (materials.some((material) => material?.name === 'Tyre')) tireMeshes.push(object);
-    materials.forEach((material) => {
-      if (!material || preparedMaterials.has(material)) return;
+    if (resolvedMaterials.some((material) => material.name === 'wheels-tires')) tireMeshes.push(object);
+    resolvedMaterials.forEach((material) => {
+      if (preparedMaterials.has(material)) return;
       preparedMaterials.add(material);
       prepareMaterial(material, maxAnisotropy);
     });
+    sourceMaterials.forEach((material) => material?.dispose());
   });
 
   car.updateMatrixWorld(true);
@@ -418,27 +464,8 @@ function installCar(model) {
     car.updateMatrixWorld(true);
   }
 
-  bodyMaterial = [...preparedMaterials].find((material) => material.name === 'body') ?? null;
-  headlightMaterial = [...preparedMaterials].find((material) => material.name === 'headlights') ?? null;
-
-  if (bodyMaterial) {
-    bodyMaterial.color.set('#a51420');
-    bodyMaterial.metalness = 0.08;
-    bodyMaterial.roughness = 0.3;
-    bodyMaterial.clearcoat = 1;
-    bodyMaterial.clearcoatRoughness = 0.065;
-    bodyMaterial.ior = 1.48;
-    bodyMaterial.envMapIntensity = 1.34;
-    bodyMaterial.needsUpdate = true;
-  }
-
-  if (headlightMaterial) {
-    headlightMaterial.depthWrite = false;
-    headlightMaterial.ior = 1.52;
-    headlightMaterial.thickness = 0.018;
-    headlightMaterial.envMapIntensity = 1.28;
-    headlightMaterial.needsUpdate = true;
-  }
+  bodyMaterial = wwcMaterials.get('carpaint') ?? null;
+  headlightMaterial = wwcMaterials.get('glass-headlights') ?? null;
 
   scene.add(car);
   gtaoPass.setSceneClipBox(new THREE.Box3(
@@ -449,204 +476,328 @@ function installCar(model) {
 
 function prepareMaterial(material, anisotropy) {
   for (const value of Object.values(material)) {
-    if (value?.isTexture) {
-      value.anisotropy = anisotropy;
-      value.needsUpdate = true;
-    }
+    if (!value?.isTexture) continue;
+    value.anisotropy = anisotropy;
+    value.needsUpdate = true;
   }
-
-  material.envMapIntensity = Math.max(material.envMapIntensity ?? 1, 1.04);
-
-  if (material.name === 'window') {
-    const glassDetail = material.map?.clone() ?? null;
-    if (glassDetail) {
-      glassDetail.colorSpace = THREE.NoColorSpace;
-      glassDetail.needsUpdate = true;
-    }
-    material.map = null;
-    material.transmissionMap = null;
-    material.roughnessMap = glassDetail;
-    material.color.set('#90a4a8');
-    material.transmission = 0.92;
-    material.opacity = 1;
-    material.transparent = false;
-    material.depthWrite = true;
-    material.roughness = 0.065;
-    material.ior = 1.58;
-    material.thickness = 0.0025;
-    material.attenuationColor?.set('#c4d8dc');
-    material.attenuationDistance = 12;
-    material.clearcoat = 0.3;
-    material.clearcoatRoughness = 0.08;
-    material.specularIntensity = 1;
-    material.envMapIntensity = 1.15;
-    material.side = THREE.FrontSide;
+  if ('envMapIntensity' in material) {
+    material.envMapIntensity = Math.max(material.envMapIntensity ?? 1, 1.04);
   }
-
-  if (material.name === 'chrome' || material.name === 'mirrormat') {
-    material.envMapIntensity = 1.55;
-  }
-
-  if (material.name === 'inner_rim') {
-    material.metalness = 0.52;
-    material.roughness = 0.3;
-    material.envMapIntensity = 1.3;
-  }
-
-  if (material.name === 'outer_rim') {
-    material.metalness = 0.72;
-    material.roughness = 0.2;
-    material.envMapIntensity = 1.45;
-  }
-
-  if (material.name === 'Tyre') {
-    material.roughness = Math.max(material.roughness, 0.74);
-  }
-
   material.needsUpdate = true;
 }
 
-function createWwcMaterials() {
+function createAdvancedMaterials(textures) {
+  const texture = (name) => {
+    const result = textures.get(name);
+    if (!result) throw new Error(`Advanced material texture is missing: ${name}`);
+    return result;
+  };
+  const normalScale = (value) => new THREE.Vector2(value, value);
   const physical = (name, parameters) => new THREE.MeshPhysicalMaterial({ name, ...parameters });
   const standard = (name, parameters) => new THREE.MeshStandardMaterial({ name, ...parameters });
-
-  return {
-    body: physical('body', {
-      color: 0xa51420,
-      metalness: 0.08,
-      roughness: 0.26,
-      clearcoat: 1,
-      clearcoatRoughness: 0.06,
-    }),
-    window: physical('window', {
-      color: 0x90a4a8,
-      metalness: 0,
-      roughness: 0.065,
-      transmission: 0.92,
-      opacity: 1,
-      transparent: false,
-      depthWrite: true,
-      ior: 1.58,
-      thickness: 0.0025,
-      clearcoat: 0.3,
-      clearcoatRoughness: 0.08,
-      side: THREE.FrontSide,
-    }),
-    headlights: physical('headlights', {
-      color: 0xf4f6f4,
-      metalness: 0,
-      roughness: 0.1,
-      transmission: 0.74,
-      opacity: 0.46,
-      transparent: true,
-      depthWrite: false,
-      emissive: 0x000000,
-      clearcoat: 1,
-      clearcoatRoughness: 0.08,
-      side: THREE.DoubleSide,
-    }),
-    clearGlass: physical('clear_glass', {
-      color: 0xf3f6f7,
-      metalness: 0,
-      roughness: 0.08,
-      transmission: 0.55,
-      opacity: 0.65,
-      transparent: true,
-      depthWrite: false,
-      clearcoat: 0.7,
-      clearcoatRoughness: 0.1,
-      side: THREE.DoubleSide,
-    }),
-    tailGlass: physical('tail_glass', {
-      color: 0x9f0710,
-      emissive: 0x180002,
-      emissiveIntensity: 0.35,
-      metalness: 0,
-      roughness: 0.2,
-      transmission: 0.14,
-      opacity: 0.88,
-      transparent: true,
-      depthWrite: false,
-      clearcoat: 1,
-      clearcoatRoughness: 0.08,
-    }),
-    orangeGlass: physical('orange_glass', {
-      color: 0xd65a08,
-      emissive: 0x321000,
-      emissiveIntensity: 0.28,
-      metalness: 0,
-      roughness: 0.18,
-      transmission: 0.18,
-      opacity: 0.9,
-      transparent: true,
-      depthWrite: false,
-      clearcoat: 1,
-      clearcoatRoughness: 0.08,
-    }),
-    chrome: standard('chrome', { color: 0xdde2e5, metalness: 1, roughness: 0.12 }),
-    mirror: standard('mirrormat', { color: 0xe8edf0, metalness: 1, roughness: 0.035 }),
-    satinMetal: standard('satin_metal', { color: 0x8d9295, metalness: 0.82, roughness: 0.3 }),
-    gunmetal: standard('gunmetal', { color: 0x292d30, metalness: 0.78, roughness: 0.34 }),
-    rim: standard('outer_rim', { color: 0xb4b6b5, metalness: 0.82, roughness: 0.2 }),
-    tire: standard('Tyre', { color: 0x08090a, metalness: 0, roughness: 0.84 }),
-    brakeDisc: standard('brake_disc', { color: 0x666b6d, metalness: 0.9, roughness: 0.3 }),
-    caliper: standard('caliper', { color: 0xe5b416, metalness: 0.18, roughness: 0.3 }),
-    rubber: standard('rubber', { color: 0x090a0b, metalness: 0, roughness: 0.78 }),
-    blackPlastic: standard('black_plastic', { color: 0x0c0d0f, metalness: 0, roughness: 0.58 }),
-    ruggedPlastic: standard('rugged_plastic', { color: 0x101113, metalness: 0, roughness: 0.82 }),
-    colorPlastic: standard('color_plastic', { color: 0x3a332f, metalness: 0, roughness: 0.52 }),
-    redPlastic: standard('red_plastic', { color: 0x8d1019, metalness: 0, roughness: 0.48 }),
-    blackLeather: physical('black_leather', { color: 0x0d0d0e, metalness: 0, roughness: 0.62, sheen: 0.18 }),
-    colorLeather: physical('color_leather', { color: 0x49413b, metalness: 0, roughness: 0.54, sheen: 0.22 }),
-    silverLeather: physical('silver_leather', { color: 0x7e7c77, metalness: 0, roughness: 0.56, sheen: 0.2 }),
-    whiteLeather: physical('white_leather', { color: 0xb4aea4, metalness: 0, roughness: 0.58, sheen: 0.18 }),
-    carpet: standard('carpet', { color: 0x09090a, metalness: 0, roughness: 0.96 }),
-    belts: standard('seat_belts', { color: 0x191a1c, metalness: 0, roughness: 0.72 }),
-    decalGlossy: physical('decal_glossy', { color: 0x090a0b, metalness: 0, roughness: 0.24, clearcoat: 0.5 }),
-    decalSatin: standard('decal_satin', { color: 0x17191b, metalness: 0, roughness: 0.6 }),
-    plate: standard('license_plate', { color: 0xd5d3c9, metalness: 0.02, roughness: 0.48 }),
-    occluder: standard('cavity_occluder', {
-      color: 0x030304,
-      metalness: 0,
-      roughness: 1,
-      envMapIntensity: 0,
-      side: THREE.DoubleSide,
-    }),
-    default: standard('wwc_default', { color: 0x26282a, metalness: 0.15, roughness: 0.48 }),
+  const materials = new Map();
+  const add = (material) => {
+    materials.set(material.name, material);
+    return material;
   };
-}
 
-function resolveWwcMaterial(name, materials) {
-  if (name.startsWith('ShadowPlanes_')) return materials.occluder;
-  if (name.startsWith('Paint_')) return materials.body;
-  if (name.startsWith('GlassWindows_')) return materials.window;
-  if (name === 'GlassHL_HL') return materials.headlights;
-  if (name.startsWith('GlassHL_TL_') || name.startsWith('GlassRed_') || name.startsWith('GlassReflector_')) return materials.tailGlass;
-  if (name.startsWith('GlassOrange_')) return materials.orangeGlass;
-  if (name.startsWith('GlassClear_')) return materials.clearGlass;
-  if (name.startsWith('Mirrors_')) return materials.mirror;
-  if (name.startsWith('MetalChrome_') || name.startsWith('Metal_')) return materials.chrome;
-  if (name.startsWith('MetalSatin_')) return materials.satinMetal;
-  if (name.startsWith('Gunmetal_')) return materials.gunmetal;
-  if (name.startsWith('Rims_')) return materials.rim;
-  if (name.startsWith('Tires_')) return materials.tire;
-  if (name.startsWith('BrakeDisc_')) return materials.brakeDisc;
-  if (name.startsWith('Calipers_')) return materials.caliper;
-  if (name.startsWith('Rubber_')) return materials.rubber;
-  if (name.startsWith('PlasticBlack_')) return materials.blackPlastic;
-  if (name.startsWith('PlasticRugged_')) return materials.ruggedPlastic;
-  if (name.startsWith('PlasticColor_')) return materials.colorPlastic;
-  if (name.startsWith('PlasticRed_')) return materials.redPlastic;
-  if (name.startsWith('LeatherBlack_')) return materials.blackLeather;
-  if (name.startsWith('LeatherColor_')) return materials.colorLeather;
-  if (name.startsWith('LeatherSilver_')) return materials.silverLeather;
-  if (name.startsWith('LeatherWhite_')) return materials.whiteLeather;
-  if (name.startsWith('Carpet_')) return materials.carpet;
-  if (name === 'Seat_belts') return materials.belts;
-  if (name.startsWith('DecalGlossy_')) return materials.decalGlossy;
-  if (name.startsWith('DecalSatin_')) return materials.decalSatin;
-  if (name === 'License_plates') return materials.plate;
-  return materials.default;
+  add(standard('undercarriage', {
+    color: 0xffffff,
+    map: texture('undercarriage_BaseColor.jpg'),
+    normalMap: texture('undercarriage_Normal.png'),
+    normalScale: normalScale(0.85),
+    roughness: 1,
+    roughnessMap: texture('undercarriage_Roughness.jpg'),
+    metalness: 0.08,
+  }));
+  add(standard('shadow-planes', {
+    color: 0x020203,
+    metalness: 0,
+    roughness: 1,
+    envMapIntensity: 0,
+  }));
+
+  add(physical('glass-reflector', {
+    color: 0x98050b,
+    normalMap: texture('glass_reflector_normal_2.jpg'),
+    normalScale: normalScale(1.15),
+    metalness: 0,
+    roughness: 0.2,
+    transmission: 0.08,
+    opacity: 0.94,
+    transparent: true,
+    depthWrite: false,
+    clearcoat: 1,
+    clearcoatRoughness: 0.075,
+    side: THREE.DoubleSide,
+  }));
+  add(physical('glass-orange', {
+    color: 0xdc5807,
+    emissive: 0x281000,
+    emissiveIntensity: 0.2,
+    normalMap: texture('glass-orange_normal.jpg'),
+    normalScale: normalScale(0.7),
+    metalness: 0,
+    roughness: 0.16,
+    transmission: 0.18,
+    opacity: 0.9,
+    transparent: true,
+    depthWrite: false,
+    clearcoat: 1,
+    clearcoatRoughness: 0.07,
+    side: THREE.DoubleSide,
+  }));
+  add(physical('glass-red-1', {
+    color: 0x97040b,
+    emissive: 0x180002,
+    emissiveIntensity: 0.24,
+    normalMap: texture('glass-red_normal.jpg'),
+    normalScale: normalScale(0.78),
+    metalness: 0,
+    roughness: 0.17,
+    transmission: 0.13,
+    opacity: 0.9,
+    transparent: true,
+    depthWrite: false,
+    clearcoat: 1,
+    clearcoatRoughness: 0.07,
+    side: THREE.DoubleSide,
+  }));
+  add(physical('glass-clear', {
+    color: 0xf4f7f7,
+    metalness: 0,
+    roughness: 0.08,
+    transmission: 0.55,
+    opacity: 0.66,
+    transparent: true,
+    depthWrite: false,
+    ior: 1.48,
+    clearcoat: 0.8,
+    clearcoatRoughness: 0.08,
+    side: THREE.DoubleSide,
+  }));
+  add(physical('glass-headlights', {
+    color: 0xf6f5ef,
+    bumpMap: texture('glass-headlights_bump.jpg'),
+    bumpScale: 0.045,
+    metalness: 0,
+    roughness: 0.08,
+    transmission: 0.72,
+    opacity: 0.48,
+    transparent: true,
+    depthWrite: false,
+    ior: 1.52,
+    thickness: 0.018,
+    emissive: 0x000000,
+    clearcoat: 1,
+    clearcoatRoughness: 0.065,
+    envMapIntensity: 1.28,
+    side: THREE.DoubleSide,
+  }));
+  add(physical('glass-tail-white', {
+    color: 0xf3f4ed,
+    normalMap: texture('glass-orange_normal.jpg'),
+    normalScale: normalScale(0.55),
+    metalness: 0,
+    roughness: 0.13,
+    transmission: 0.48,
+    opacity: 0.7,
+    transparent: true,
+    depthWrite: false,
+    clearcoat: 1,
+    clearcoatRoughness: 0.07,
+    side: THREE.DoubleSide,
+  }));
+  add(physical('glass-red-2', {
+    color: 0x790208,
+    emissive: 0x120001,
+    emissiveIntensity: 0.2,
+    normalMap: texture('glass-orange_normal.jpg'),
+    normalScale: normalScale(0.5),
+    metalness: 0,
+    roughness: 0.16,
+    transmission: 0.11,
+    opacity: 0.92,
+    transparent: true,
+    depthWrite: false,
+    clearcoat: 1,
+    clearcoatRoughness: 0.07,
+    side: THREE.DoubleSide,
+  }));
+  add(physical('glass-windows', {
+    color: 0x90a4a8,
+    metalness: 0,
+    roughness: 0.065,
+    transmission: 0.92,
+    opacity: 1,
+    transparent: false,
+    depthWrite: true,
+    ior: 1.58,
+    thickness: 0.0025,
+    attenuationColor: 0xc4d8dc,
+    attenuationDistance: 12,
+    clearcoat: 0.3,
+    clearcoatRoughness: 0.08,
+    specularIntensity: 1,
+    envMapIntensity: 1.15,
+    side: THREE.FrontSide,
+  }));
+
+  add(physical('interior-decal-B', {
+    color: 0xffffff,
+    map: texture('interior-decal-B_BaseColor.jpg'),
+    normalMap: texture('interior-decal-B_Normal.png'),
+    normalScale: normalScale(0.65),
+    roughness: 1,
+    roughnessMap: texture('interior-decal-B_Roughness.jpg'),
+    metalness: 0,
+  }));
+  add(physical('interior-decal-A', {
+    color: 0xffffff,
+    map: texture('interior-decal-A_BaseColor.jpg'),
+    normalMap: texture('interior-decal-A_Normal.png'),
+    normalScale: normalScale(0.65),
+    roughness: 1,
+    roughnessMap: texture('interior-decal-A_Roughness.jpg'),
+    metalness: 0,
+    specularIntensity: 1,
+    specularIntensityMap: texture('interior-decal-A_Specular.jpg'),
+  }));
+  add(physical('interior-leather', {
+    color: 0xffffff,
+    map: texture('interior-leather_BaseColor.jpg'),
+    normalMap: texture('interior-leather_Normal.png'),
+    normalScale: normalScale(0.75),
+    roughness: 1,
+    roughnessMap: texture('interior-leather_Roughness.jpg'),
+    metalness: 0,
+    sheen: 0.18,
+    sheenRoughness: 0.72,
+  }));
+  add(physical('interior-seats', {
+    color: 0xffffff,
+    map: texture('interior-seats_BaseColor.jpg'),
+    normalMap: texture('interior-seats_Normal.png'),
+    normalScale: normalScale(0.75),
+    roughness: 1,
+    roughnessMap: texture('interior-seats_Roughness.jpg'),
+    metalness: 1,
+    metalnessMap: texture('interior-seats_Metallic.jpg'),
+    sheen: 0.16,
+    sheenRoughness: 0.75,
+  }));
+  add(physical('interior-fabric', {
+    color: 0xffffff,
+    map: texture('interior-fabric_BaseColor.jpg'),
+    normalMap: texture('interior-fabric_Normal.png'),
+    normalScale: normalScale(0.8),
+    roughness: 0.82,
+    metalness: 0,
+    specularIntensity: 1,
+    specularIntensityMap: texture('interior-fabric_Specular.jpg'),
+    sheen: 0.34,
+    sheenRoughness: 0.86,
+  }));
+  add(physical('interior-common', {
+    color: 0xffffff,
+    map: texture('interior-common_BaseColor.jpg'),
+    normalMap: texture('interior-common_Normal.png'),
+    normalScale: normalScale(0.85),
+    roughness: 1,
+    roughnessMap: texture('interior-common_Roughness.jpg'),
+    metalness: 1,
+    metalnessMap: texture('interior-common_Metallic.jpg'),
+    specularIntensity: 1,
+    specularIntensityMap: texture('interior-common_Specular.jpg'),
+  }));
+
+  add(physical('exterior-badges', {
+    color: 0xffffff,
+    map: texture('exterior-badges_BaseColor.jpg'),
+    normalMap: texture('exterior-badges_Normal.png'),
+    normalScale: normalScale(0.85),
+    roughness: 1,
+    roughnessMap: texture('exterior-badges_Roughness.jpg'),
+    metalness: 1,
+    metalnessMap: texture('exterior-badges_Metallic.jpg'),
+    clearcoat: 0.16,
+    clearcoatRoughness: 0.12,
+  }));
+  add(standard('exterior-common', {
+    color: 0xffffff,
+    map: texture('exterior-common_BaseColor.jpg'),
+    normalMap: texture('exterior-common_Normal.png'),
+    normalScale: normalScale(0.9),
+    roughness: 1,
+    roughnessMap: texture('exterior-common_Roughness.jpg'),
+    metalness: 1,
+    metalnessMap: texture('exterior-common_Metallic.jpg'),
+    envMapIntensity: 1.25,
+  }));
+  add(physical('carpaint', {
+    color: 0xa51420,
+    normalMap: texture('carpaint_Normal.png'),
+    normalScale: normalScale(0.32),
+    roughness: 1,
+    roughnessMap: texture('carpaint_Roughness.jpg'),
+    metalness: 0.08,
+    clearcoat: 1,
+    clearcoatRoughness: 0.065,
+    ior: 1.48,
+    envMapIntensity: 1.34,
+  }));
+  add(standard('exterior-bolts', {
+    color: 0xffffff,
+    map: texture('exterior-bolts_BaseColor.jpg'),
+    roughness: 1,
+    roughnessMap: texture('exterior-bolts_Roughness.jpg'),
+    metalness: 0.55,
+    envMapIntensity: 1.3,
+  }));
+
+  add(standard('wheels-caliper', {
+    color: 0xffffff,
+    map: texture('wheels-caliper_BaseColor.jpg'),
+    roughness: 1,
+    roughnessMap: texture('wheels-caliper_Roughness.jpg'),
+    metalness: 1,
+    metalnessMap: texture('wheels-caliper_Metallic.jpg'),
+    envMapIntensity: 1.18,
+  }));
+  add(physical('wheels-tires', {
+    color: 0xffffff,
+    map: texture('wheels-tires_BaseColor.jpg'),
+    normalMap: texture('wheels-tires_Normal.png'),
+    normalScale: normalScale(0.82),
+    roughness: 1,
+    roughnessMap: texture('wheels-tires_Roughness.jpg'),
+    metalness: 0,
+    specularIntensity: 1,
+    specularIntensityMap: texture('wheels-tires_Specular.jpg'),
+    envMapIntensity: 0.72,
+  }));
+  add(standard('wheels-disc', {
+    color: 0xffffff,
+    map: texture('wheels-disc_BaseColor.jpg'),
+    normalMap: texture('wheels-disc_Normal.png'),
+    normalScale: normalScale(0.72),
+    roughness: 1,
+    roughnessMap: texture('wheels-disc_Roughness.jpg'),
+    metalness: 1,
+    metalnessMap: texture('wheels-disc_Metallic.jpg'),
+    envMapIntensity: 1.2,
+  }));
+  add(standard('wheels-rim', {
+    color: 0xbfc2c4,
+    normalMap: texture('wheels-rim_Normal.png'),
+    normalScale: normalScale(0.72),
+    roughness: 1,
+    roughnessMap: texture('wheels-rim_Roughness.jpg'),
+    metalness: 0.86,
+    envMapIntensity: 1.42,
+  }));
+  add(standard('default', { color: 0x292b2d, metalness: 0.15, roughness: 0.5 }));
+  return materials;
 }
 
 function createStage() {

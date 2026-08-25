@@ -4,11 +4,7 @@ import {
   createHash,
   randomBytes,
 } from 'node:crypto';
-import {
-  constants as zlibConstants,
-  gunzipSync,
-  gzipSync,
-} from 'node:zlib';
+import { cpus } from 'node:os';
 import {
   existsSync,
   mkdirSync,
@@ -16,17 +12,17 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  rmdirSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HEADER_BYTES = 32;
 const AUTH_TAG_BYTES = 16;
-const FORMAT_VERSION = 1;
-const COMPRESSION_GZIP = 1;
+const FORMAT_VERSION = 2;
+const COMPRESSION_NONE = 0;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
 const KEY_SCRAMBLE_MULTIPLIER = 73;
@@ -34,14 +30,27 @@ const KEY_SCRAMBLE_OFFSET = 41;
 const PAYLOAD_PATTERN = /^p959-[0-9a-f]{20}\.p9e$/;
 const MAGIC = Buffer.from([0x50, 0x39, 0x35, 0x39, 0x45, 0x4e, 0x43, 0x00]);
 
+const BUNDLE_HEADER_BYTES = 16;
+const BUNDLE_FORMAT_VERSION = 1;
+const BUNDLE_MAGIC = Buffer.from([0x50, 0x39, 0x35, 0x39, 0x42, 0x4e, 0x44, 0x00]);
+const TEXTURE_PIPELINE_VERSION = 1;
+const ASSET_VARIANT = 'advanced-v2';
+const MODEL_SCALE = 1;
+const EXCLUDED_TEXTURES = new Set([
+  'wwc_background.jpg',
+  'wwc_environment.exr',
+  'wwc_floor_opacity.jpg',
+]);
+
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-export const localModelDirectory = join(projectRoot, 'local-models', 'wwc');
-export const sourceModelPath = join(localModelDirectory, '87_porsche_959_WWC.fbx');
+export const localModelDirectory = join(projectRoot, 'local-models', 'wwc-advanced');
+export const sourceModelPath = join(localModelDirectory, '87_POR_959_wwc_ADV_v2.fbx');
 export const sourceLicensePath = join(localModelDirectory, 'License.txt');
-export const legacyModelDirectory = join(projectRoot, 'public', 'models', 'wwc');
-export const legacyModelPath = join(legacyModelDirectory, '87_porsche_959_WWC.fbx');
+export const sourceTextureDirectory = join(localModelDirectory, 'textures');
+export const webTextureDirectory = join(localModelDirectory, 'web-textures');
 export const protectedModelDirectory = join(projectRoot, 'public', 'models', 'protected');
 export const manifestPath = join(localModelDirectory, 'protection-manifest.json');
+const texturePipelineManifestPath = join(localModelDirectory, 'texture-pipeline.json');
 
 function sha256(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -75,7 +84,7 @@ function buildHeader(sourceBytes, iv) {
   const header = Buffer.alloc(HEADER_BYTES);
   MAGIC.copy(header, 0);
   header.writeUInt8(FORMAT_VERSION, 8);
-  header.writeUInt8(COMPRESSION_GZIP, 9);
+  header.writeUInt8(COMPRESSION_NONE, 9);
   header.writeUInt16LE(HEADER_BYTES, 10);
   header.writeUInt32LE(sourceBytes, 12);
   iv.copy(header, 16);
@@ -83,18 +92,13 @@ function buildHeader(sourceBytes, iv) {
   return header;
 }
 
-function readManifest() {
-  if (!existsSync(manifestPath)) return null;
+function readJson(path) {
+  if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(manifestPath, 'utf8'));
+    return JSON.parse(readFileSync(path, 'utf8'));
   } catch {
     return null;
   }
-}
-
-function payloadPathForManifest(manifest) {
-  if (!manifest?.payloadFile || !PAYLOAD_PATTERN.test(manifest.payloadFile)) return null;
-  return join(protectedModelDirectory, manifest.payloadFile);
 }
 
 function writeJsonAtomically(path, value) {
@@ -103,74 +107,268 @@ function writeJsonAtomically(path, value) {
   renameSync(temporaryPath, path);
 }
 
-export function migrateLegacyModel() {
-  if (!existsSync(legacyModelPath)) return false;
-
-  mkdirSync(localModelDirectory, { recursive: true });
-  if (!existsSync(sourceModelPath)) {
-    renameSync(legacyModelPath, sourceModelPath);
-  }
-
-  const legacyLicensePath = join(legacyModelDirectory, 'License.txt');
-  if (existsSync(legacyLicensePath) && !existsSync(sourceLicensePath)) {
-    renameSync(legacyLicensePath, sourceLicensePath);
-  }
-
-  if (existsSync(legacyModelPath)) {
-    throw new Error(`Both legacy and local model files exist. Remove the duplicate at ${legacyModelPath}.`);
-  }
-
-  try {
-    if (readdirSync(legacyModelDirectory).length === 0) rmdirSync(legacyModelDirectory);
-  } catch {
-    // An unrelated file may remain in the legacy directory; leave it untouched.
-  }
-
-  console.log(`Moved the plaintext FBX out of public/ to ${sourceModelPath}`);
-  return true;
+function payloadPathForManifest(manifest) {
+  if (!manifest?.payloadFile || !PAYLOAD_PATTERN.test(manifest.payloadFile)) return null;
+  return join(protectedModelDirectory, manifest.payloadFile);
 }
 
-export function protectModel({ force = false } = {}) {
-  migrateLegacyModel();
+function classifyTexture(name) {
+  if (/_BaseColor\./i.test(name)) return 'color';
+  if (/_Specular\./i.test(name)) return 'specular';
+  if (/Normal|_normal|bump/i.test(name)) return 'normal';
+  return 'data';
+}
 
-  if (!existsSync(sourceModelPath)) {
+function textureResize(name) {
+  if (/^interior-(common|fabric|leather|seats)_/i.test(name)) return '2048x2048';
+  if (name === 'carpaint_Roughness.jpg') return '4096x4096';
+  return null;
+}
+
+function listTextureSources() {
+  if (!existsSync(sourceTextureDirectory)) return [];
+  return readdirSync(sourceTextureDirectory)
+    .filter((name) => /\.(?:jpe?g|png)$/i.test(name) && !EXCLUDED_TEXTURES.has(name))
+    .sort()
+    .map((name) => ({
+      name,
+      path: join(sourceTextureDirectory, name),
+      outputName: name.replace(/\.[^.]+$/, '.ktx2'),
+      role: classifyTexture(name),
+      resize: textureResize(name),
+    }));
+}
+
+function collectSourceSignature(textureSources) {
+  const modelStat = statSync(sourceModelPath);
+  return {
+    model: {
+      name: '87_POR_959_wwc_ADV_v2.fbx',
+      size: modelStat.size,
+      modified: Math.trunc(modelStat.mtimeMs),
+    },
+    textures: textureSources.map((texture) => {
+      const textureStat = statSync(texture.path);
+      return {
+        name: texture.name,
+        size: textureStat.size,
+        modified: Math.trunc(textureStat.mtimeMs),
+        role: texture.role,
+        resize: texture.resize,
+      };
+    }),
+  };
+}
+
+function signaturesMatch(first, second) {
+  return JSON.stringify(first) === JSON.stringify(second);
+}
+
+function findToktx() {
+  const candidates = [
+    process.env.P959_TOKTX,
+    process.env.TOKTX,
+    join(projectRoot, 'local-models', '.tools', 'ktx-4.4.2', 'bin', 'toktx'),
+    'toktx',
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (result.status === 0) return candidate;
+  }
+
+  throw new Error(
+    'Khronos `toktx` is required to prepare the advanced textures. '
+    + 'Install KTX-Software 4.4.2+ or set P959_TOKTX=/path/to/toktx.',
+  );
+}
+
+function texturePipelineIsCurrent(manifest, sourceSignature) {
+  if (
+    manifest?.pipelineVersion !== TEXTURE_PIPELINE_VERSION
+    || !signaturesMatch(manifest.sourceSignature, sourceSignature)
+    || !Array.isArray(manifest.entries)
+  ) return false;
+
+  return manifest.entries.every((entry) => {
+    const outputPath = join(webTextureDirectory, entry.outputName ?? '');
+    return existsSync(outputPath) && statSync(outputPath).size === entry.byteLength;
+  });
+}
+
+function encodeTexture(toktx, texture, index, count) {
+  const outputPath = join(webTextureDirectory, texture.outputName);
+  const temporaryOutputPath = join(
+    webTextureDirectory,
+    `${texture.outputName.replace(/\.ktx2$/, '')}.tmp-${process.pid}.ktx2`,
+  );
+  const transferFunction = texture.role === 'color' ? 'srgb' : 'linear';
+  const primaries = texture.role === 'color' ? 'srgb' : 'none';
+  const rdoLambda = texture.role === 'normal' ? '0.5' : texture.role === 'color' ? '0.75' : '1.0';
+  const args = [
+    '--t2',
+    '--encode', 'uastc',
+    '--uastc_quality', '2',
+    '--uastc_rdo_l', rdoLambda,
+    '--zcmp', '18',
+    '--genmipmap',
+    '--filter', 'lanczos4',
+    '--lower_left_maps_to_s0t0',
+    '--assign_oetf', transferFunction,
+    '--assign_primaries', primaries,
+    '--target_type', texture.role === 'specular' ? 'RGBA' : 'RGB',
+    '--threads', String(Math.min(Math.max(cpus().length, 1), 8)),
+  ];
+  if (texture.role === 'specular') args.push('--input_swizzle', 'rrrr');
+  if (texture.resize) args.push('--resize', texture.resize);
+  args.push(temporaryOutputPath, texture.path);
+
+  console.log(`[${index + 1}/${count}] Encoding ${texture.name}${texture.resize ? ` at ${texture.resize}` : ''}...`);
+  const result = spawnSync(toktx, args, { stdio: 'inherit' });
+  if (result.error?.code === 'ENOENT') throw new Error(`Could not run toktx at ${toktx}.`);
+  if (result.status !== 0) throw new Error(`toktx failed for ${texture.name} (exit ${result.status}).`);
+  renameSync(temporaryOutputPath, outputPath);
+}
+
+function prepareWebTextures(textureSources, sourceSignature, rebuildTextures) {
+  const previousManifest = readJson(texturePipelineManifestPath);
+  if (!rebuildTextures && texturePipelineIsCurrent(previousManifest, sourceSignature)) {
+    console.log(`Web texture set is current (${previousManifest.entries.length} KTX2 maps).`);
+    return previousManifest;
+  }
+
+  const toktx = findToktx();
+  mkdirSync(webTextureDirectory, { recursive: true });
+  textureSources.forEach((texture, index) => encodeTexture(toktx, texture, index, textureSources.length));
+
+  const entries = textureSources.map((texture) => {
+    const outputPath = join(webTextureDirectory, texture.outputName);
+    const output = readFileSync(outputPath);
+    return {
+      sourceName: texture.name,
+      outputName: texture.outputName,
+      role: texture.role,
+      byteLength: output.length,
+      sha256: sha256(output),
+    };
+  });
+  const manifest = {
+    pipelineVersion: TEXTURE_PIPELINE_VERSION,
+    sourceSignature,
+    entries,
+    generatedAt: new Date().toISOString(),
+  };
+  writeJsonAtomically(texturePipelineManifestPath, manifest);
+
+  const expectedOutputs = new Set(entries.map((entry) => entry.outputName));
+  for (const entry of readdirSync(webTextureDirectory)) {
+    if (entry.endsWith('.ktx2') && !expectedOutputs.has(entry)) {
+      rmSync(join(webTextureDirectory, entry));
+    }
+  }
+
+  return manifest;
+}
+
+function buildAssetBundle(model, textureManifest) {
+  const textureAssets = textureManifest.entries.map((entry) => ({
+    buffer: readFileSync(join(webTextureDirectory, entry.outputName)),
+    metadata: {
+      kind: 'texture',
+      name: entry.sourceName,
+      role: entry.role,
+      mimeType: 'image/ktx2',
+      byteLength: entry.byteLength,
+    },
+  }));
+  const assets = [
+    {
+      buffer: model,
+      metadata: {
+        kind: 'model',
+        name: '87_POR_959_wwc_ADV_v2.fbx',
+        mimeType: 'application/octet-stream',
+        byteLength: model.length,
+      },
+    },
+    ...textureAssets,
+  ];
+  const directory = Buffer.from(JSON.stringify({
+    formatVersion: BUNDLE_FORMAT_VERSION,
+    entries: assets.map((asset) => asset.metadata),
+  }));
+  const header = Buffer.alloc(BUNDLE_HEADER_BYTES);
+  BUNDLE_MAGIC.copy(header, 0);
+  header.writeUInt8(BUNDLE_FORMAT_VERSION, 8);
+  header.writeUInt16LE(BUNDLE_HEADER_BYTES, 10);
+  header.writeUInt32LE(directory.length, 12);
+  return Buffer.concat([header, directory, ...assets.map((asset) => asset.buffer)]);
+}
+
+function validateAssetBundle(bundle, expectedTextureCount) {
+  if (bundle.length < BUNDLE_HEADER_BYTES || !bundle.subarray(0, BUNDLE_MAGIC.length).equals(BUNDLE_MAGIC)) {
+    throw new Error('Protected asset bundle header is invalid.');
+  }
+  if (bundle.readUInt8(8) !== BUNDLE_FORMAT_VERSION || bundle.readUInt16LE(10) !== BUNDLE_HEADER_BYTES) {
+    throw new Error('Protected asset bundle version is unsupported.');
+  }
+  const directoryBytes = bundle.readUInt32LE(12);
+  const dataOffset = BUNDLE_HEADER_BYTES + directoryBytes;
+  if (dataOffset > bundle.length) throw new Error('Protected asset bundle directory is invalid.');
+  const directory = JSON.parse(bundle.subarray(BUNDLE_HEADER_BYTES, dataOffset).toString('utf8'));
+  if (!Array.isArray(directory.entries)) throw new Error('Protected asset bundle entries are missing.');
+  const modelEntries = directory.entries.filter((entry) => entry.kind === 'model');
+  const textureEntries = directory.entries.filter((entry) => entry.kind === 'texture');
+  const declaredBytes = directory.entries.reduce((total, entry) => total + entry.byteLength, 0);
+  if (
+    modelEntries.length !== 1
+    || textureEntries.length !== expectedTextureCount
+    || dataOffset + declaredBytes !== bundle.length
+  ) throw new Error('Protected asset bundle contents are invalid.');
+  return directory;
+}
+
+function previousPayloadIsCurrent(manifest, sourceSignature) {
+  const payloadPath = payloadPathForManifest(manifest);
+  return manifest?.formatVersion === FORMAT_VERSION
+    && manifest?.assetVariant === ASSET_VARIANT
+    && manifest?.texturePipelineVersion === TEXTURE_PIPELINE_VERSION
+    && signaturesMatch(manifest?.sourceSignature, sourceSignature)
+    && payloadPath
+    && existsSync(payloadPath)
+    && statSync(payloadPath).size === manifest.payloadBytes
+    && sha256(readFileSync(payloadPath)) === manifest.payloadSha256;
+}
+
+export function protectModel({ force = false, rebuildTextures = false } = {}) {
+  if (!existsSync(sourceModelPath) || !existsSync(sourceTextureDirectory)) {
     throw new Error(
-      `Local model not found at ${sourceModelPath}. Run \`npm run setup:model -- /path/to/006_porsche_959_wwc.zip\` first.`,
+      `Advanced model assets are missing. Run \`npm run setup:model -- ~/Downloads/WireWheelsClub_87_POR_959_v2_ADV.zip\` first.`,
     );
   }
 
-  const source = readFileSync(sourceModelPath);
-  const sourceSha256 = sha256(source);
-  const previousManifest = readManifest();
-  const previousPayloadPath = payloadPathForManifest(previousManifest);
-
-  const previousPayloadIsCurrent = previousPayloadPath
-    && existsSync(previousPayloadPath)
-    && statSync(previousPayloadPath).size === previousManifest?.payloadBytes
-    && sha256(readFileSync(previousPayloadPath)) === previousManifest?.payloadSha256;
-
-  if (
-    !force
-    && previousManifest?.formatVersion === FORMAT_VERSION
-    && previousManifest?.sourceSha256 === sourceSha256
-    && previousManifest?.sourceBytes === source.length
-    && previousPayloadIsCurrent
-  ) {
-    console.log(`Protected model is current: ${relative(projectRoot, previousPayloadPath)}`);
-    source.fill(0);
+  const textureSources = listTextureSources();
+  if (textureSources.length < 50) {
+    throw new Error(`Expected the advanced PBR texture set, but found only ${textureSources.length} supported maps.`);
+  }
+  const sourceSignature = collectSourceSignature(textureSources);
+  const previousManifest = readJson(manifestPath);
+  if (!force && !rebuildTextures && previousPayloadIsCurrent(previousManifest, sourceSignature)) {
+    console.log(`Protected advanced model is current: ${relative(projectRoot, payloadPathForManifest(previousManifest))}`);
     return { manifest: previousManifest, reused: true };
   }
 
-  console.log(`Compressing ${Math.round(source.length / 1_000_000)} MB model...`);
-  const compressed = gzipSync(source, {
-    level: zlibConstants.Z_BEST_COMPRESSION,
-  });
+  const textureManifest = prepareWebTextures(textureSources, sourceSignature, rebuildTextures);
+  const model = readFileSync(sourceModelPath);
+  console.log(`Bundling ${Math.round(model.length / 1_000_000)} MB FBX with ${textureManifest.entries.length} KTX2 maps...`);
+  const bundle = buildAssetBundle(model, textureManifest);
+  const sourceSha256 = sha256(bundle);
   const key = randomBytes(KEY_BYTES);
   const iv = randomBytes(IV_BYTES);
-  const header = buildHeader(source.length, iv);
+  const header = buildHeader(bundle.length, iv);
   const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: AUTH_TAG_BYTES });
   cipher.setAAD(header);
-  const encrypted = Buffer.concat([cipher.update(compressed), cipher.final(), cipher.getAuthTag()]);
+  const encrypted = Buffer.concat([cipher.update(bundle), cipher.final(), cipher.getAuthTag()]);
   const payload = Buffer.concat([header, encrypted]);
   const payloadSha256 = sha256(payload);
   const payloadFile = `p959-${payloadSha256.slice(0, 20)}.p9e`;
@@ -190,14 +388,21 @@ export function protectModel({ force = false } = {}) {
   const publicPath = relative(join(projectRoot, 'public'), payloadPath).split(sep).join('/');
   const manifest = {
     formatVersion: FORMAT_VERSION,
+    assetVariant: ASSET_VARIANT,
+    modelScale: MODEL_SCALE,
     encryption: 'AES-256-GCM',
-    compression: 'gzip',
+    compression: 'none',
+    textureEncoding: 'KTX2/UASTC',
+    texturePipelineVersion: TEXTURE_PIPELINE_VERSION,
+    textureCount: textureManifest.entries.length,
     payloadFile,
     publicPath,
     payloadBytes: payload.length,
-    sourceBytes: source.length,
+    sourceBytes: bundle.length,
+    modelSourceBytes: model.length,
     sourceSha256,
     payloadSha256,
+    sourceSignature,
     keyShareA: keyShareA.toString('base64'),
     keyShareB: Buffer.from(keyShareB).reverse().toString('base64'),
     generatedAt: new Date().toISOString(),
@@ -213,27 +418,27 @@ export function protectModel({ force = false } = {}) {
   key.fill(0);
   keyShareA.fill(0);
   keyShareB.fill(0);
-  source.fill(0);
-  compressed.fill(0);
+  model.fill(0);
+  bundle.fill(0);
 
   console.log(
-    `Protected model written to ${relative(projectRoot, payloadPath)} `
+    `Protected advanced model written to ${relative(projectRoot, payloadPath)} `
     + `(${(payload.length / 1_000_000).toFixed(1)} MB encrypted).`,
   );
   return { manifest, reused: false };
 }
 
 export function verifyProtectedModel() {
-  const manifest = readManifest();
+  const manifest = readJson(manifestPath);
   const payloadPath = payloadPathForManifest(manifest);
   if (!manifest || !payloadPath || !existsSync(payloadPath)) {
-    throw new Error('Protected model is missing. Run `npm run setup:model` first.');
+    throw new Error('Protected advanced model is missing. Run `npm run setup:model` first.');
   }
 
   const payload = readFileSync(payloadPath);
   if (!payload.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Protected model header is invalid.');
   if (payload.readUInt8(8) !== FORMAT_VERSION) throw new Error('Protected model version is unsupported.');
-  if (payload.readUInt8(9) !== COMPRESSION_GZIP) throw new Error('Protected model compression is unsupported.');
+  if (payload.readUInt8(9) !== COMPRESSION_NONE) throw new Error('Protected model compression is unsupported.');
   const headerBytes = payload.readUInt16LE(10);
   if (headerBytes !== HEADER_BYTES) throw new Error('Protected model header length is invalid.');
 
@@ -246,13 +451,13 @@ export function verifyProtectedModel() {
   const decipher = createDecipheriv('aes-256-gcm', key, iv, { authTagLength: AUTH_TAG_BYTES });
   decipher.setAAD(header);
   decipher.setAuthTag(authTag);
-  const compressed = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  const source = gunzipSync(compressed);
+  const bundle = Buffer.concat([decipher.update(encrypted), decipher.final()]);
   key.fill(0);
 
-  if (source.length !== manifest.sourceBytes || source.length !== header.readUInt32LE(12)) {
-    throw new Error('Protected model unpacked to an unexpected size.');
+  if (bundle.length !== manifest.sourceBytes || bundle.length !== header.readUInt32LE(12)) {
+    throw new Error('Protected model decrypted to an unexpected size.');
   }
-  if (sha256(source) !== manifest.sourceSha256) throw new Error('Protected model checksum does not match.');
+  if (sha256(bundle) !== manifest.sourceSha256) throw new Error('Protected model checksum does not match.');
+  validateAssetBundle(bundle, manifest.textureCount);
   return manifest;
 }

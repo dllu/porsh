@@ -62,7 +62,7 @@ try {
   page.on('request', (request) => assetRequests.push(request.url()));
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  // The WWC FBX is 2.57m triangles. Select balanced mode before shader compilation
+  // The advanced WWC FBX is 2.19m triangles. Select balanced mode before shader compilation
   // so the software-rendered CI check remains practical.
   await page.evaluate(() => document.querySelector('[data-quality="balanced"]').click());
   await page.waitForSelector('body.is-ready', { timeout: 240_000 });
@@ -80,6 +80,7 @@ try {
   if (state.activeView !== 'HERO') failures.push(`view: expected HERO, got ${state.activeView}`);
   if (!assetRequests.some((requestUrl) => requestUrl.endsWith('.p9e'))) failures.push('protected model payload was not requested');
   if (assetRequests.some((requestUrl) => requestUrl.toLowerCase().endsWith('.fbx'))) failures.push('plaintext FBX was requested');
+  if (assetRequests.some((requestUrl) => /\.(?:jpe?g|png|ktx2)(?:$|\?)/i.test(requestUrl))) failures.push('standalone paid texture was requested');
 
   await page.waitForTimeout(600);
   await page.screenshot({ path: 'viewer-smoke.png', fullPage: true, timeout: 90_000 });
@@ -105,6 +106,7 @@ try {
 
   await page.locator('#settings-button').click();
   if (!(await page.locator('#settings-panel').getAttribute('class')).includes('is-open')) failures.push('settings panel did not open');
+  await page.waitForSelector('#settings-panel.is-open', { state: 'visible' });
   await page.locator('[data-paint="Night Blue"]').click();
 
   await page.locator('[data-paint="Guards Red"]').click();

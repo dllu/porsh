@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
-const manifestPath = resolve(projectRoot, 'local-models', 'wwc', 'protection-manifest.json');
+const manifestPath = resolve(projectRoot, 'local-models', 'wwc-advanced', 'protection-manifest.json');
 const protectedDirectory = resolve(projectRoot, 'public', 'models', 'protected');
+const basisDirectory = resolve(projectRoot, 'node_modules', 'three', 'examples', 'jsm', 'libs', 'basis');
 const modelRuntimeModule = 'virtual:p959-model-runtime';
 const modelWorkerKeyModule = 'virtual:p959-model-worker-key';
 const resolvedModelRuntimeModule = `\0${modelRuntimeModule}`;
@@ -35,6 +36,9 @@ function protectedModelPlugin(manifest) {
     publicPath: manifest.publicPath,
     payloadBytes: manifest.payloadBytes,
     sourceBytes: manifest.sourceBytes,
+    modelScale: manifest.modelScale,
+    textureCount: manifest.textureCount,
+    assetVariant: manifest.assetVariant,
   };
 
   return {
@@ -59,11 +63,47 @@ function protectedModelPlugin(manifest) {
   };
 }
 
+function basisTranscoderDevPlugin() {
+  const assets = new Map([
+    ['basis/basis_transcoder.js', {
+      path: resolve(basisDirectory, 'basis_transcoder.js'),
+      contentType: 'text/javascript; charset=utf-8',
+    }],
+    ['basis/basis_transcoder.wasm', {
+      path: resolve(basisDirectory, 'basis_transcoder.wasm'),
+      contentType: 'application/wasm',
+    }],
+  ]);
+
+  return {
+    name: 'p959-basis-transcoder-dev',
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const pathname = new URL(request.url ?? '/', 'http://localhost').pathname.replace(/^\//, '');
+        const asset = assets.get(pathname);
+        if (!asset) {
+          next();
+          return;
+        }
+        response.statusCode = 200;
+        response.setHeader('Content-Type', asset.contentType);
+        response.setHeader('Cache-Control', 'no-cache');
+        response.end(readFileSync(asset.path));
+      });
+    },
+  };
+}
+
 export default defineConfig(() => {
   const manifest = loadProtectedModelConfig();
   return {
     base: './',
-    plugins: [protectedModelPlugin(manifest)],
+    plugins: [protectedModelPlugin(manifest), basisTranscoderDevPlugin()],
+    server: {
+      watch: {
+        ignored: ['**/local-models/**'],
+      },
+    },
     worker: {
       plugins: () => [protectedModelPlugin(manifest)],
     },
