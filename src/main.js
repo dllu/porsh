@@ -526,14 +526,21 @@ function installCar(model, textures) {
     if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'exterior-badges') {
       assignLicensePlateMaterial(object, wwcMaterials.get('license-plates'));
     }
+    if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'glass-orange') {
+      assignFrontLampMaterial(object, wwcMaterials.get('glass-orange-front'));
+    }
+    if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'glass-clear') {
+      assignFrontLampMaterial(object, wwcMaterials.get('indicator-bulbs'));
+    }
 
-    const isOccluder = resolvedMaterials.some((material) => material.name === 'shadow-planes');
-    object.castShadow = !isOccluder && resolvedMaterials.every((material) => (
+    const installedMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    const isOccluder = installedMaterials.some((material) => material.name === 'shadow-planes');
+    object.castShadow = !isOccluder && installedMaterials.every((material) => (
       !material.transparent && !material.transmission
     ));
     object.receiveShadow = !isOccluder;
-    if (resolvedMaterials.some((material) => material.name === 'wheels-tires')) tireMeshes.push(object);
-    resolvedMaterials.forEach((material) => {
+    if (installedMaterials.some((material) => material.name === 'wheels-tires')) tireMeshes.push(object);
+    installedMaterials.forEach((material) => {
       if (preparedMaterials.has(material)) return;
       preparedMaterials.add(material);
       prepareMaterial(material, maxAnisotropy);
@@ -569,6 +576,56 @@ function prepareMaterial(material, anisotropy) {
     value.needsUpdate = true;
   }
   material.needsUpdate = true;
+}
+
+function assignFrontLampMaterial(mesh, frontMaterial) {
+  const geometry = mesh.geometry;
+  const position = geometry.attributes.position;
+  const index = geometry.index;
+  if (!position || !frontMaterial || Array.isArray(mesh.material)) return;
+
+  // The FBX batches front, side, and rear lamp components into shared meshes.
+  // Select the isolated front band with material groups; position and UV data stay untouched.
+  geometry.computeBoundingBox();
+  const { min, max } = geometry.boundingBox;
+  const extent = new THREE.Vector3().subVectors(max, min);
+  const longitudinalAxis = extent.x > extent.y
+    ? (extent.x > extent.z ? 0 : 2)
+    : (extent.y > extent.z ? 1 : 2);
+  const frontBoundary = min.getComponent(longitudinalAxis)
+    + extent.getComponent(longitudinalAxis) * 0.12;
+  const drawCount = index ? index.count : position.count;
+  const materialIndices = new Uint8Array(drawCount / 3);
+  let frontTriangleCount = 0;
+
+  for (let offset = 0; offset < drawCount; offset += 3) {
+    let longitudinalCentroid = 0;
+    for (let corner = 0; corner < 3; corner += 1) {
+      const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
+      if (longitudinalAxis === 0) longitudinalCentroid += position.getX(vertexIndex);
+      else if (longitudinalAxis === 1) longitudinalCentroid += position.getY(vertexIndex);
+      else longitudinalCentroid += position.getZ(vertexIndex);
+    }
+    const isFront = longitudinalCentroid / 3 < frontBoundary;
+    materialIndices[offset / 3] = isFront ? 1 : 0;
+    if (isFront) frontTriangleCount += 1;
+  }
+
+  if (frontTriangleCount === 0) return;
+
+  geometry.clearGroups();
+  let groupStart = 0;
+  let activeMaterial = materialIndices[0];
+  for (let triangle = 1; triangle < materialIndices.length; triangle += 1) {
+    const materialIndex = materialIndices[triangle];
+    if (materialIndex === activeMaterial) continue;
+    const groupEnd = triangle * 3;
+    geometry.addGroup(groupStart, groupEnd - groupStart, activeMaterial);
+    groupStart = groupEnd;
+    activeMaterial = materialIndex;
+  }
+  geometry.addGroup(groupStart, drawCount - groupStart, activeMaterial);
+  mesh.material = [mesh.material, frontMaterial];
 }
 
 function assignLicensePlateMaterial(mesh, plateMaterial) {
@@ -627,6 +684,20 @@ function createAdvancedMaterials(textures) {
   const normalScale = (value) => new THREE.Vector2(value, value);
   const physical = (name, parameters) => new THREE.MeshPhysicalMaterial({ name, ...parameters });
   const standard = (name, parameters) => new THREE.MeshStandardMaterial({ name, ...parameters });
+  const softenTransmission = (material, roughness) => {
+    // Keep the authored lens relief sharp while sampling internals from a softer framebuffer mip.
+    const source = /n\s*,\s*v\s*,\s*material\.roughness\s*,\s*material\.diffuseContribution/;
+    const replacement = `n, v, ${roughness.toFixed(3)}, material.diffuseContribution`;
+    const transmissionChunk = THREE.ShaderChunk.transmission_fragment.replace(source, replacement);
+    material.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <transmission_fragment>',
+        transmissionChunk,
+      );
+    };
+    material.customProgramCacheKey = () => `${material.name}-transmission-${roughness}`;
+    return material;
+  };
   const materials = new Map();
   const add = (material) => {
     materials.set(material.name, material);
@@ -669,7 +740,7 @@ function createAdvancedMaterials(textures) {
     envMapIntensity: 1.28,
     side: THREE.DoubleSide,
   }));
-  add(physical('glass-orange', {
+  const orangeLensMaterial = add(physical('glass-orange', {
     color: 0xd05005,
     emissive: 0x281000,
     emissiveIntensity: 0.06,
@@ -689,6 +760,31 @@ function createAdvancedMaterials(textures) {
     clearcoatRoughness: 0.035,
     envMapIntensity: 1.3,
     side: THREE.DoubleSide,
+  }));
+  const frontOrangeLensMaterial = orangeLensMaterial.clone();
+  frontOrangeLensMaterial.name = 'glass-orange-front';
+  // The authored inner face carries the useful fluted response. Treat it as the
+  // frosted cover so the close reflector cannot composite sharply through it.
+  frontOrangeLensMaterial.normalScale.setScalar(0.07);
+  frontOrangeLensMaterial.opacity = 1;
+  frontOrangeLensMaterial.transparent = false;
+  frontOrangeLensMaterial.depthWrite = true;
+  frontOrangeLensMaterial.roughness = 0.28;
+  frontOrangeLensMaterial.transmission = 0.45;
+  frontOrangeLensMaterial.thickness = 0.018;
+  frontOrangeLensMaterial.attenuationDistance = 0.12;
+  frontOrangeLensMaterial.emissiveIntensity = 0.02;
+  frontOrangeLensMaterial.clearcoat = 0;
+  frontOrangeLensMaterial.envMapIntensity = 0.5;
+  frontOrangeLensMaterial.side = THREE.BackSide;
+  add(softenTransmission(frontOrangeLensMaterial, 0.42));
+  add(standard('indicator-bulbs', {
+    color: 0xffc28a,
+    emissive: 0xff6514,
+    emissiveIntensity: 0.3,
+    metalness: 0,
+    roughness: 0.42,
+    envMapIntensity: 0.45,
   }));
   add(physical('glass-red-1', {
     color: 0x8a0309,
