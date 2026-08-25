@@ -701,6 +701,32 @@ function createAdvancedMaterials(textures) {
     material.customProgramCacheKey = () => `${material.name}-transmission-${roughness}`;
     return material;
   };
+  // The lamp covers are thin closed shells. Render only the authored inward face
+  // with depth writes so the opposite wall cannot blend back through the lens.
+  const finishFrostedLensShell = (material, {
+    normalStrength = 0.07,
+    roughness = 0.28,
+    transmission = 0.45,
+    thickness = 0.018,
+    attenuationDistance = material.attenuationDistance,
+    emissiveIntensity = material.emissiveIntensity,
+    envMapIntensity = 0.5,
+    transmissionRoughness = 0.42,
+  } = {}) => {
+    material.normalScale?.setScalar(normalStrength);
+    material.opacity = 1;
+    material.transparent = false;
+    material.depthWrite = true;
+    material.roughness = roughness;
+    material.transmission = transmission;
+    material.thickness = thickness;
+    material.attenuationDistance = attenuationDistance;
+    material.emissiveIntensity = emissiveIntensity;
+    material.clearcoat = 0;
+    material.envMapIntensity = envMapIntensity;
+    material.side = THREE.BackSide;
+    return softenTransmission(material, transmissionRoughness);
+  };
   const materials = new Map();
   const add = (material) => {
     materials.set(material.name, material);
@@ -724,7 +750,7 @@ function createAdvancedMaterials(textures) {
     envMapIntensity: 0,
   }));
 
-  add(physical('glass-reflector', {
+  add(finishFrostedLensShell(physical('glass-reflector', {
     color: 0x87050b,
     normalMap: texture('glass_reflector_normal_2.jpg'),
     normalScale: normalScale(1.55),
@@ -742,6 +768,14 @@ function createAdvancedMaterials(textures) {
     clearcoatRoughness: 0.035,
     envMapIntensity: 1.28,
     side: THREE.DoubleSide,
+  }), {
+    normalStrength: 0.09,
+    roughness: 0.25,
+    transmission: 0.34,
+    attenuationDistance: 0.1,
+    emissiveIntensity: 0.035,
+    envMapIntensity: 0.52,
+    transmissionRoughness: 0.38,
   }));
   const orangeLensMaterial = add(physical('glass-orange', {
     color: 0xd05005,
@@ -768,19 +802,10 @@ function createAdvancedMaterials(textures) {
   endOrangeLensMaterial.name = 'glass-orange-ends';
   // The authored inner face carries the useful fluted response. Treat it as the
   // frosted cover so the close reflector cannot composite sharply through it.
-  endOrangeLensMaterial.normalScale.setScalar(0.07);
-  endOrangeLensMaterial.opacity = 1;
-  endOrangeLensMaterial.transparent = false;
-  endOrangeLensMaterial.depthWrite = true;
-  endOrangeLensMaterial.roughness = 0.28;
-  endOrangeLensMaterial.transmission = 0.45;
-  endOrangeLensMaterial.thickness = 0.018;
-  endOrangeLensMaterial.attenuationDistance = 0.12;
-  endOrangeLensMaterial.emissiveIntensity = 0.02;
-  endOrangeLensMaterial.clearcoat = 0;
-  endOrangeLensMaterial.envMapIntensity = 0.5;
-  endOrangeLensMaterial.side = THREE.BackSide;
-  add(softenTransmission(endOrangeLensMaterial, 0.42));
+  add(finishFrostedLensShell(endOrangeLensMaterial, {
+    attenuationDistance: 0.12,
+    emissiveIntensity: 0.02,
+  }));
   add(standard('indicator-bulbs', {
     color: 0xffc28a,
     emissive: 0xff6514,
@@ -789,7 +814,7 @@ function createAdvancedMaterials(textures) {
     roughness: 0.42,
     envMapIntensity: 0.45,
   }));
-  add(physical('glass-red-1', {
+  add(finishFrostedLensShell(physical('glass-red-1', {
     color: 0x8a0309,
     emissive: 0x180002,
     emissiveIntensity: 0.06,
@@ -809,6 +834,14 @@ function createAdvancedMaterials(textures) {
     clearcoatRoughness: 0.035,
     envMapIntensity: 1.27,
     side: THREE.DoubleSide,
+  }), {
+    normalStrength: 0.08,
+    roughness: 0.25,
+    transmission: 0.38,
+    attenuationDistance: 0.1,
+    emissiveIntensity: 0.035,
+    envMapIntensity: 0.52,
+    transmissionRoughness: 0.38,
   }));
   add(physical('glass-clear', {
     color: 0xf4f7f7,
@@ -843,7 +876,7 @@ function createAdvancedMaterials(textures) {
     side: THREE.DoubleSide,
     forceSinglePass: true,
   }));
-  add(physical('glass-tail-white', {
+  add(finishFrostedLensShell(physical('glass-tail-white', {
     color: 0xf0f1eb,
     normalMap: texture('glass-orange_normal.jpg'),
     normalScale: normalScale(1),
@@ -859,8 +892,14 @@ function createAdvancedMaterials(textures) {
     clearcoatRoughness: 0.035,
     envMapIntensity: 1.3,
     side: THREE.DoubleSide,
+  }), {
+    roughness: 0.23,
+    transmission: 0.55,
+    thickness: 0.016,
+    envMapIntensity: 0.58,
+    transmissionRoughness: 0.34,
   }));
-  add(physical('glass-red-2', {
+  add(finishFrostedLensShell(physical('glass-red-2', {
     color: 0x710207,
     emissive: 0x120001,
     emissiveIntensity: 0.06,
@@ -880,6 +919,14 @@ function createAdvancedMaterials(textures) {
     clearcoatRoughness: 0.035,
     envMapIntensity: 1.25,
     side: THREE.DoubleSide,
+  }), {
+    normalStrength: 0.08,
+    roughness: 0.25,
+    transmission: 0.36,
+    attenuationDistance: 0.1,
+    emissiveIntensity: 0.035,
+    envMapIntensity: 0.52,
+    transmissionRoughness: 0.38,
   }));
   add(physical('glass-windows', {
     color: 0x90a4a8,
