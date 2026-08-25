@@ -527,10 +527,10 @@ function installCar(model, textures) {
       assignLicensePlateMaterial(object, wwcMaterials.get('license-plates'));
     }
     if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'glass-orange') {
-      assignFrontLampMaterial(object, wwcMaterials.get('glass-orange-front'));
+      assignLampEndMaterial(object, wwcMaterials.get('glass-orange-ends'), true);
     }
     if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'glass-clear') {
-      assignFrontLampMaterial(object, wwcMaterials.get('indicator-bulbs'));
+      assignLampEndMaterial(object, wwcMaterials.get('indicator-bulbs'));
     }
 
     const installedMaterials = Array.isArray(object.material) ? object.material : [object.material];
@@ -578,14 +578,14 @@ function prepareMaterial(material, anisotropy) {
   material.needsUpdate = true;
 }
 
-function assignFrontLampMaterial(mesh, frontMaterial) {
+function assignLampEndMaterial(mesh, endMaterial, includeRear = false) {
   const geometry = mesh.geometry;
   const position = geometry.attributes.position;
   const index = geometry.index;
-  if (!position || !frontMaterial || Array.isArray(mesh.material)) return;
+  if (!position || !endMaterial || Array.isArray(mesh.material)) return;
 
   // The FBX batches front, side, and rear lamp components into shared meshes.
-  // Select the isolated front band with material groups; position and UV data stay untouched.
+  // Select isolated endpoint bands with material groups; position and UV data stay untouched.
   geometry.computeBoundingBox();
   const { min, max } = geometry.boundingBox;
   const extent = new THREE.Vector3().subVectors(max, min);
@@ -594,9 +594,11 @@ function assignFrontLampMaterial(mesh, frontMaterial) {
     : (extent.y > extent.z ? 1 : 2);
   const frontBoundary = min.getComponent(longitudinalAxis)
     + extent.getComponent(longitudinalAxis) * 0.12;
+  const rearBoundary = max.getComponent(longitudinalAxis)
+    - extent.getComponent(longitudinalAxis) * 0.12;
   const drawCount = index ? index.count : position.count;
   const materialIndices = new Uint8Array(drawCount / 3);
-  let frontTriangleCount = 0;
+  let endTriangleCount = 0;
 
   for (let offset = 0; offset < drawCount; offset += 3) {
     let longitudinalCentroid = 0;
@@ -606,12 +608,13 @@ function assignFrontLampMaterial(mesh, frontMaterial) {
       else if (longitudinalAxis === 1) longitudinalCentroid += position.getY(vertexIndex);
       else longitudinalCentroid += position.getZ(vertexIndex);
     }
-    const isFront = longitudinalCentroid / 3 < frontBoundary;
-    materialIndices[offset / 3] = isFront ? 1 : 0;
-    if (isFront) frontTriangleCount += 1;
+    const endPosition = longitudinalCentroid / 3;
+    const isEnd = endPosition < frontBoundary || (includeRear && endPosition > rearBoundary);
+    materialIndices[offset / 3] = isEnd ? 1 : 0;
+    if (isEnd) endTriangleCount += 1;
   }
 
-  if (frontTriangleCount === 0) return;
+  if (endTriangleCount === 0) return;
 
   geometry.clearGroups();
   let groupStart = 0;
@@ -625,7 +628,7 @@ function assignFrontLampMaterial(mesh, frontMaterial) {
     activeMaterial = materialIndex;
   }
   geometry.addGroup(groupStart, drawCount - groupStart, activeMaterial);
-  mesh.material = [mesh.material, frontMaterial];
+  mesh.material = [mesh.material, endMaterial];
 }
 
 function assignLicensePlateMaterial(mesh, plateMaterial) {
@@ -761,23 +764,23 @@ function createAdvancedMaterials(textures) {
     envMapIntensity: 1.3,
     side: THREE.DoubleSide,
   }));
-  const frontOrangeLensMaterial = orangeLensMaterial.clone();
-  frontOrangeLensMaterial.name = 'glass-orange-front';
+  const endOrangeLensMaterial = orangeLensMaterial.clone();
+  endOrangeLensMaterial.name = 'glass-orange-ends';
   // The authored inner face carries the useful fluted response. Treat it as the
   // frosted cover so the close reflector cannot composite sharply through it.
-  frontOrangeLensMaterial.normalScale.setScalar(0.07);
-  frontOrangeLensMaterial.opacity = 1;
-  frontOrangeLensMaterial.transparent = false;
-  frontOrangeLensMaterial.depthWrite = true;
-  frontOrangeLensMaterial.roughness = 0.28;
-  frontOrangeLensMaterial.transmission = 0.45;
-  frontOrangeLensMaterial.thickness = 0.018;
-  frontOrangeLensMaterial.attenuationDistance = 0.12;
-  frontOrangeLensMaterial.emissiveIntensity = 0.02;
-  frontOrangeLensMaterial.clearcoat = 0;
-  frontOrangeLensMaterial.envMapIntensity = 0.5;
-  frontOrangeLensMaterial.side = THREE.BackSide;
-  add(softenTransmission(frontOrangeLensMaterial, 0.42));
+  endOrangeLensMaterial.normalScale.setScalar(0.07);
+  endOrangeLensMaterial.opacity = 1;
+  endOrangeLensMaterial.transparent = false;
+  endOrangeLensMaterial.depthWrite = true;
+  endOrangeLensMaterial.roughness = 0.28;
+  endOrangeLensMaterial.transmission = 0.45;
+  endOrangeLensMaterial.thickness = 0.018;
+  endOrangeLensMaterial.attenuationDistance = 0.12;
+  endOrangeLensMaterial.emissiveIntensity = 0.02;
+  endOrangeLensMaterial.clearcoat = 0;
+  endOrangeLensMaterial.envMapIntensity = 0.5;
+  endOrangeLensMaterial.side = THREE.BackSide;
+  add(softenTransmission(endOrangeLensMaterial, 0.42));
   add(standard('indicator-bulbs', {
     color: 0xffc28a,
     emissive: 0xff6514,
