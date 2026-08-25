@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
-import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -9,7 +9,6 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { keyShareA as encodedKeyShareA, modelMeta } from 'virtual:p959-model-runtime';
 import './style.css';
 
@@ -48,9 +47,10 @@ const renderer = new THREE.WebGLRenderer({
 
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.88;
+renderer.toneMappingExposure = 0.92;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.shadowMap.autoUpdate = false;
 renderer.setClearColor(0x08090a, 1);
 
 const scene = new THREE.Scene();
@@ -74,8 +74,6 @@ controls.autoRotate = !window.matchMedia('(prefers-reduced-motion: reduce)').mat
 controls.autoRotateSpeed = 0.34;
 controls.zoomToCursor = true;
 
-RectAreaLightUniformsLib.init();
-
 const stage = createStage();
 scene.add(stage.group);
 
@@ -91,11 +89,11 @@ const gtaoPass = new GTAOPass(
   window.innerHeight,
   undefined,
   {
-    radius: 0.22,
-    distanceExponent: 1.15,
-    thickness: 1.2,
-    distanceFallOff: 0.7,
-    scale: 1,
+    radius: 0.3,
+    distanceExponent: 1.2,
+    thickness: 0.72,
+    distanceFallOff: 0.8,
+    scale: 1.25,
     samples: 12,
   },
   {
@@ -109,13 +107,13 @@ const gtaoPass = new GTAOPass(
   },
 );
 gtaoPass.output = GTAOPass.OUTPUT.Default;
-gtaoPass.blendIntensity = 0.58;
+gtaoPass.blendIntensity = 0.66;
 
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.045,
-  0.42,
-  1.35,
+  0.018,
+  0.3,
+  1.6,
 );
 const smaaPass = new SMAAPass();
 const outputPass = new OutputPass();
@@ -161,8 +159,62 @@ const cameraPresets = {
   },
 };
 
+const paintProfiles = {
+  'Guards Red': {
+    color: 0xa51420,
+    metalness: 0.08,
+    roughness: 1,
+    clearcoat: 1,
+    clearcoatRoughness: 0.09,
+    envMapIntensity: 1.08,
+  },
+  'Silver Metallic': {
+    color: 0xbfc3c4,
+    metalness: 0.32,
+    roughness: 0.46,
+    clearcoat: 1,
+    clearcoatRoughness: 0.08,
+    envMapIntensity: 0.85,
+    useRoughnessMap: false,
+  },
+  'Graphite Metallic': {
+    color: 0x62696c,
+    metalness: 0.82,
+    roughness: 0.4,
+    clearcoat: 1,
+    clearcoatRoughness: 0.08,
+    envMapIntensity: 0.98,
+    useRoughnessMap: false,
+  },
+  'Basalt Black': {
+    color: 0x0b0c0e,
+    metalness: 0.12,
+    roughness: 1.2,
+    clearcoat: 0.9,
+    clearcoatRoughness: 0.11,
+    envMapIntensity: 1.05,
+  },
+  'Grand Prix White': {
+    color: 0xd9d5ca,
+    metalness: 0.04,
+    roughness: 1.12,
+    clearcoat: 0.9,
+    clearcoatRoughness: 0.1,
+    envMapIntensity: 1,
+  },
+  'Night Blue': {
+    color: 0x1b2c46,
+    metalness: 0.22,
+    roughness: 1.15,
+    clearcoat: 0.95,
+    clearcoatRoughness: 0.1,
+    envMapIntensity: 1.08,
+  },
+};
+
 let car = null;
 let bodyMaterial = null;
+let bodyRoughnessMap = null;
 let headlightMaterial = null;
 let cameraTween = null;
 let activeView = 'hero';
@@ -214,11 +266,13 @@ async function loadExperience() {
       loadModel(),
     ]);
 
+    attenuateEnvironmentGroundHemisphere(environment);
     environment.mapping = THREE.EquirectangularReflectionMapping;
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     pmremGenerator.compileEquirectangularShader();
     const environmentMap = pmremGenerator.fromEquirectangular(environment).texture;
     scene.environment = environmentMap;
+    environment.dispose();
     pmremGenerator.dispose();
 
     installCar(model.scene, model.textures);
@@ -254,7 +308,7 @@ async function loadExperience() {
 
 function loadEnvironment() {
   return new Promise((resolve, reject) => {
-    new RGBELoader().load(
+    new HDRLoader().load(
       ENVIRONMENT_URL,
       resolve,
       (event) => {
@@ -264,6 +318,34 @@ function loadEnvironment() {
       reject,
     );
   });
+}
+
+function attenuateEnvironmentGroundHemisphere(environment) {
+  const { data, width, height } = environment.image;
+  const horizon = Math.floor(height * 0.5);
+  const fadeDepth = Math.max(Math.floor(height * 0.16), 1);
+  const groundIntensity = 0.12;
+  const halfFloat = environment.type === THREE.HalfFloatType;
+
+  for (let y = horizon; y < height; y += 1) {
+    const linearFade = THREE.MathUtils.clamp((y - horizon) / fadeDepth, 0, 1);
+    const smoothFade = linearFade * linearFade * (3 - 2 * linearFade);
+    const attenuation = THREE.MathUtils.lerp(1, groundIntensity, smoothFade);
+    const rowOffset = y * width * 4;
+
+    for (let x = 0; x < width; x += 1) {
+      const pixelOffset = rowOffset + x * 4;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const index = pixelOffset + channel;
+        const value = halfFloat ? THREE.DataUtils.fromHalfFloat(data[index]) : data[index];
+        data[index] = halfFloat
+          ? THREE.DataUtils.toHalfFloat(value * attenuation)
+          : value * attenuation;
+      }
+    }
+  }
+
+  environment.needsUpdate = true;
 }
 
 async function loadModel() {
@@ -441,9 +523,14 @@ function installCar(model, textures) {
       wwcMaterials.get(material?.name) ?? wwcMaterials.get('default')
     ));
     object.material = Array.isArray(object.material) ? resolvedMaterials : resolvedMaterials[0];
+    if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'exterior-badges') {
+      assignLicensePlateMaterial(object, wwcMaterials.get('license-plates'));
+    }
 
     const isOccluder = resolvedMaterials.some((material) => material.name === 'shadow-planes');
-    object.castShadow = !isOccluder && resolvedMaterials.every((material) => !material.transparent);
+    object.castShadow = !isOccluder && resolvedMaterials.every((material) => (
+      !material.transparent && !material.transmission
+    ));
     object.receiveShadow = !isOccluder;
     if (resolvedMaterials.some((material) => material.name === 'wheels-tires')) tireMeshes.push(object);
     resolvedMaterials.forEach((material) => {
@@ -465,6 +552,7 @@ function installCar(model, textures) {
   }
 
   bodyMaterial = wwcMaterials.get('carpaint') ?? null;
+  bodyRoughnessMap = bodyMaterial?.roughnessMap ?? null;
   headlightMaterial = wwcMaterials.get('glass-headlights') ?? null;
 
   scene.add(car);
@@ -480,13 +568,57 @@ function prepareMaterial(material, anisotropy) {
     value.anisotropy = anisotropy;
     value.needsUpdate = true;
   }
-  if ('envMapIntensity' in material) {
-    material.envMapIntensity = Math.max(material.envMapIntensity ?? 1, 1.04);
-  }
   material.needsUpdate = true;
 }
 
+function assignLicensePlateMaterial(mesh, plateMaterial) {
+  const geometry = mesh.geometry;
+  const position = geometry.attributes.position;
+  const index = geometry.index;
+  if (!position || !plateMaterial) return;
+
+  geometry.computeBoundingBox();
+  const { min, max } = geometry.boundingBox;
+  const extent = new THREE.Vector3().subVectors(max, min);
+  const longitudinalAxis = extent.x > extent.y
+    ? (extent.x > extent.z ? 0 : 2)
+    : (extent.y > extent.z ? 1 : 2);
+  const endpointDepth = extent.getComponent(longitudinalAxis) * 0.012;
+  const endpointMin = min.getComponent(longitudinalAxis);
+  const endpointMax = max.getComponent(longitudinalAxis);
+  const triangleCount = index ? index.count : position.count;
+  let groupStart = 0;
+  let activeMaterial = null;
+  let plateTriangles = 0;
+
+  geometry.clearGroups();
+  for (let offset = 0; offset < triangleCount; offset += 3) {
+    let longitudinalCentroid = 0;
+    for (let corner = 0; corner < 3; corner += 1) {
+      const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
+      if (longitudinalAxis === 0) longitudinalCentroid += position.getX(vertexIndex);
+      else if (longitudinalAxis === 1) longitudinalCentroid += position.getY(vertexIndex);
+      else longitudinalCentroid += position.getZ(vertexIndex);
+    }
+    longitudinalCentroid /= 3;
+
+    const materialIndex = longitudinalCentroid < endpointMin + endpointDepth
+      || longitudinalCentroid > endpointMax - endpointDepth ? 1 : 0;
+    if (materialIndex === 1) plateTriangles += 1;
+    if (activeMaterial === null) activeMaterial = materialIndex;
+    if (materialIndex === activeMaterial) continue;
+
+    geometry.addGroup(groupStart, offset - groupStart, activeMaterial);
+    groupStart = offset;
+    activeMaterial = materialIndex;
+  }
+  geometry.addGroup(groupStart, triangleCount - groupStart, activeMaterial);
+
+  if (plateTriangles > 0) mesh.material = [mesh.material, plateMaterial];
+}
+
 function createAdvancedMaterials(textures) {
+  // Lamp maps retain the source asset's native KTX2 orientation and FBX UVs.
   const texture = (name) => {
     const result = textures.get(name);
     if (!result) throw new Error(`Advanced material texture is missing: ${name}`);
@@ -509,6 +641,7 @@ function createAdvancedMaterials(textures) {
     roughness: 1,
     roughnessMap: texture('undercarriage_Roughness.jpg'),
     metalness: 0.08,
+    envMapIntensity: 0.5,
   }));
   add(standard('shadow-planes', {
     color: 0x020203,
@@ -518,49 +651,64 @@ function createAdvancedMaterials(textures) {
   }));
 
   add(physical('glass-reflector', {
-    color: 0x98050b,
+    color: 0x87050b,
     normalMap: texture('glass_reflector_normal_2.jpg'),
-    normalScale: normalScale(1.15),
+    normalScale: normalScale(1.55),
     metalness: 0,
-    roughness: 0.2,
-    transmission: 0.08,
-    opacity: 0.94,
+    roughness: 0.15,
+    transmission: 0.16,
+    opacity: 0.96,
     transparent: true,
     depthWrite: false,
+    ior: 1.48,
+    thickness: 0.024,
+    attenuationColor: 0xa00008,
+    attenuationDistance: 0.075,
     clearcoat: 1,
-    clearcoatRoughness: 0.075,
+    clearcoatRoughness: 0.035,
+    envMapIntensity: 1.28,
     side: THREE.DoubleSide,
   }));
   add(physical('glass-orange', {
-    color: 0xdc5807,
+    color: 0xd05005,
     emissive: 0x281000,
-    emissiveIntensity: 0.2,
+    emissiveIntensity: 0.06,
     normalMap: texture('glass-orange_normal.jpg'),
-    normalScale: normalScale(0.7),
+    normalScale: normalScale(1.35),
     metalness: 0,
-    roughness: 0.16,
-    transmission: 0.18,
-    opacity: 0.9,
+    roughness: 0.13,
+    transmission: 0.3,
+    opacity: 0.92,
     transparent: true,
     depthWrite: false,
+    ior: 1.48,
+    thickness: 0.024,
+    attenuationColor: 0xff7218,
+    attenuationDistance: 0.075,
     clearcoat: 1,
-    clearcoatRoughness: 0.07,
+    clearcoatRoughness: 0.035,
+    envMapIntensity: 1.3,
     side: THREE.DoubleSide,
   }));
   add(physical('glass-red-1', {
-    color: 0x97040b,
+    color: 0x8a0309,
     emissive: 0x180002,
-    emissiveIntensity: 0.24,
+    emissiveIntensity: 0.06,
     normalMap: texture('glass-red_normal.jpg'),
-    normalScale: normalScale(0.78),
+    normalScale: normalScale(1.45),
     metalness: 0,
-    roughness: 0.17,
-    transmission: 0.13,
-    opacity: 0.9,
+    roughness: 0.14,
+    transmission: 0.22,
+    opacity: 0.93,
     transparent: true,
     depthWrite: false,
+    ior: 1.48,
+    thickness: 0.024,
+    attenuationColor: 0xb5000a,
+    attenuationDistance: 0.075,
     clearcoat: 1,
-    clearcoatRoughness: 0.07,
+    clearcoatRoughness: 0.035,
+    envMapIntensity: 1.27,
     side: THREE.DoubleSide,
   }));
   add(physical('glass-clear', {
@@ -579,49 +727,59 @@ function createAdvancedMaterials(textures) {
   add(physical('glass-headlights', {
     color: 0xf6f5ef,
     bumpMap: texture('glass-headlights_bump.jpg'),
-    bumpScale: 0.045,
+    bumpScale: 2.75,
     metalness: 0,
-    roughness: 0.08,
-    transmission: 0.72,
-    opacity: 0.48,
+    roughness: 0.09,
+    transmission: 0.62,
+    opacity: 0.62,
     transparent: true,
     depthWrite: false,
     ior: 1.52,
     thickness: 0.018,
     emissive: 0x000000,
-    clearcoat: 1,
-    clearcoatRoughness: 0.065,
-    envMapIntensity: 1.28,
-    side: THREE.DoubleSide,
-  }));
-  add(physical('glass-tail-white', {
-    color: 0xf3f4ed,
-    normalMap: texture('glass-orange_normal.jpg'),
-    normalScale: normalScale(0.55),
-    metalness: 0,
-    roughness: 0.13,
-    transmission: 0.48,
-    opacity: 0.7,
-    transparent: true,
-    depthWrite: false,
+    emissiveMap: texture('glass-headlights_bump.jpg'),
     clearcoat: 1,
     clearcoatRoughness: 0.07,
+    envMapIntensity: 1.2,
+    side: THREE.DoubleSide,
+    forceSinglePass: true,
+  }));
+  add(physical('glass-tail-white', {
+    color: 0xf0f1eb,
+    normalMap: texture('glass-orange_normal.jpg'),
+    normalScale: normalScale(1),
+    metalness: 0,
+    roughness: 0.1,
+    transmission: 0.62,
+    opacity: 0.8,
+    transparent: true,
+    depthWrite: false,
+    ior: 1.48,
+    thickness: 0.018,
+    clearcoat: 1,
+    clearcoatRoughness: 0.035,
+    envMapIntensity: 1.3,
     side: THREE.DoubleSide,
   }));
   add(physical('glass-red-2', {
-    color: 0x790208,
+    color: 0x710207,
     emissive: 0x120001,
-    emissiveIntensity: 0.2,
+    emissiveIntensity: 0.06,
     normalMap: texture('glass-orange_normal.jpg'),
-    normalScale: normalScale(0.5),
+    normalScale: normalScale(1),
     metalness: 0,
-    roughness: 0.16,
-    transmission: 0.11,
-    opacity: 0.92,
+    roughness: 0.13,
+    transmission: 0.18,
+    opacity: 0.94,
     transparent: true,
     depthWrite: false,
+    ior: 1.48,
+    thickness: 0.024,
+    attenuationColor: 0x970008,
+    attenuationDistance: 0.075,
     clearcoat: 1,
-    clearcoatRoughness: 0.07,
+    clearcoatRoughness: 0.035,
+    envMapIntensity: 1.25,
     side: THREE.DoubleSide,
   }));
   add(physical('glass-windows', {
@@ -742,9 +900,9 @@ function createAdvancedMaterials(textures) {
     roughnessMap: texture('carpaint_Roughness.jpg'),
     metalness: 0.08,
     clearcoat: 1,
-    clearcoatRoughness: 0.065,
+    clearcoatRoughness: 0.09,
     ior: 1.48,
-    envMapIntensity: 1.34,
+    envMapIntensity: 1.08,
   }));
   add(standard('exterior-bolts', {
     color: 0xffffff,
@@ -762,7 +920,7 @@ function createAdvancedMaterials(textures) {
     roughnessMap: texture('wheels-caliper_Roughness.jpg'),
     metalness: 1,
     metalnessMap: texture('wheels-caliper_Metallic.jpg'),
-    envMapIntensity: 1.18,
+    envMapIntensity: 0.78,
   }));
   add(physical('wheels-tires', {
     color: 0xffffff,
@@ -785,16 +943,21 @@ function createAdvancedMaterials(textures) {
     roughnessMap: texture('wheels-disc_Roughness.jpg'),
     metalness: 1,
     metalnessMap: texture('wheels-disc_Metallic.jpg'),
-    envMapIntensity: 1.2,
+    envMapIntensity: 0.88,
   }));
   add(standard('wheels-rim', {
-    color: 0xbfc2c4,
+    color: 0xb8bab8,
     normalMap: texture('wheels-rim_Normal.png'),
     normalScale: normalScale(0.72),
-    roughness: 1,
-    roughnessMap: texture('wheels-rim_Roughness.jpg'),
-    metalness: 0.86,
-    envMapIntensity: 1.42,
+    roughness: 0.5,
+    metalness: 0.42,
+    envMapIntensity: 0.68,
+  }));
+  add(standard('license-plates', {
+    color: 0x111315,
+    roughness: 0.62,
+    metalness: 0.08,
+    envMapIntensity: 0.35,
   }));
   add(standard('default', { color: 0x292b2d, metalness: 0.15, roughness: 0.5 }));
   return materials;
@@ -905,12 +1068,17 @@ function createStudioBackdrop() {
 
 function createLighting() {
   const group = new THREE.Group();
+  const studioRig = new THREE.Group();
+  group.add(studioRig);
 
-  const hemisphere = new THREE.HemisphereLight(0xdbe6ff, 0x170d0b, 0.16);
+  const hemisphere = new THREE.HemisphereLight(0xcbd3dc, 0x080707, 0.22);
   group.add(hemisphere);
 
-  const key = new THREE.DirectionalLight(0xfff5eb, 0.72);
-  key.position.set(-3.8, 7.8, 4.8);
+  // The HDRI supplies the visible softboxes and ambient fill. This directional
+  // light is only a shadow-casting proxy for the panorama's dominant broad
+  // source, centered near 38 degrees azimuth and 24 degrees elevation.
+  const key = new THREE.DirectionalLight(0xfff5eb, 0.46);
+  key.position.set(7.6, 4.6, 5.8);
   key.target.position.set(0, 0.4, 0);
   key.castShadow = true;
   key.shadow.mapSize.set(4096, 4096);
@@ -920,29 +1088,10 @@ function createLighting() {
   key.shadow.camera.bottom = -4.2;
   key.shadow.camera.near = 1;
   key.shadow.camera.far = 18;
-  key.shadow.bias = -0.00016;
-  key.shadow.normalBias = 0.018;
-  key.shadow.radius = 3;
-  group.add(key, key.target);
-
-  const frontSoftbox = new THREE.RectAreaLight(0xffe7d0, 1.15, 4.2, 3.1);
-  frontSoftbox.position.set(4.7, 4.1, 4.2);
-  frontSoftbox.lookAt(0, 0.65, 0.2);
-  group.add(frontSoftbox);
-
-  const rimSoftbox = new THREE.RectAreaLight(0xb8d1ff, 0.9, 3.5, 2.4);
-  rimSoftbox.position.set(-4.2, 3.2, -3.8);
-  rimSoftbox.lookAt(0, 0.75, -0.2);
-  group.add(rimSoftbox);
-
-  const overhead = new THREE.RectAreaLight(0xffffff, 0.55, 5.5, 2.2);
-  overhead.position.set(0, 5.6, -0.2);
-  overhead.rotation.x = -Math.PI / 2;
-  group.add(overhead);
-
-  const cabinFill = new THREE.PointLight(0xffead7, 2.2, 2.1, 2);
-  cabinFill.position.set(0, 1.02, -0.12);
-  group.add(cabinFill);
+  key.shadow.bias = -0.00012;
+  key.shadow.normalBias = 0.012;
+  key.shadow.radius = 24;
+  studioRig.add(key, key.target);
 
   const headlightTargets = [];
   const headlightSpots = [-0.61, 0.61].map((x) => {
@@ -954,7 +1103,7 @@ function createLighting() {
     return spot;
   });
 
-  return { group, key, cabinFill, headlightSpots, headlightTargets };
+  return { group, studioRig, hemisphere, key, headlightSpots, headlightTargets };
 }
 
 function setupInterface() {
@@ -996,11 +1145,7 @@ function setupInterface() {
         swatch.setAttribute('aria-checked', String(selected));
       });
       document.querySelector('#paint-name').value = button.dataset.paint;
-      if (bodyMaterial) {
-        bodyMaterial.color.set(button.dataset.color);
-        bodyMaterial.metalness = Number(button.dataset.metalness);
-        bodyMaterial.needsUpdate = true;
-      }
+      applyPaintProfile(button.dataset.paint);
       renderer.shadowMap.needsUpdate = true;
     });
   });
@@ -1079,6 +1224,20 @@ function initializeRange(input) {
   updateRange(input);
 }
 
+function applyPaintProfile(name) {
+  const profile = paintProfiles[name];
+  if (!bodyMaterial || !profile) return;
+
+  bodyMaterial.color.setHex(profile.color);
+  bodyMaterial.roughnessMap = profile.useRoughnessMap === false ? null : bodyRoughnessMap;
+  bodyMaterial.metalness = profile.metalness;
+  bodyMaterial.roughness = profile.roughness;
+  bodyMaterial.clearcoat = profile.clearcoat;
+  bodyMaterial.clearcoatRoughness = profile.clearcoatRoughness;
+  bodyMaterial.envMapIntensity = profile.envMapIntensity;
+  bodyMaterial.needsUpdate = true;
+}
+
 function updateRange(input) {
   const min = Number(input.min);
   const max = Number(input.max);
@@ -1089,6 +1248,9 @@ function updateRange(input) {
 function setStudioRotation(degrees) {
   const radians = THREE.MathUtils.degToRad(degrees);
   scene.environmentRotation.y = radians;
+  lights.studioRig.rotation.y = radians;
+  lights.studioRig.updateMatrixWorld(true);
+  renderer.shadowMap.needsUpdate = true;
 }
 
 function setHeadlights(enabled) {
@@ -1098,7 +1260,7 @@ function setHeadlights(enabled) {
 
   if (headlightMaterial) {
     headlightMaterial.emissive.set(enabled ? 0xffe4b5 : 0x000000);
-    headlightMaterial.emissiveIntensity = enabled ? 5.5 : 0;
+    headlightMaterial.emissiveIntensity = enabled ? 1.35 : 0;
     if (!headlightMaterial.emissiveMap && headlightMaterial.map) {
       headlightMaterial.emissiveMap = headlightMaterial.map;
     }
@@ -1226,6 +1388,7 @@ function configureQuality(mode, announce = true) {
   composer.renderTarget1.samples = profile.msaa;
   composer.renderTarget2.samples = profile.msaa;
   lights.key.shadow.mapSize.set(profile.shadow, profile.shadow);
+  lights.key.shadow.radius = profile.shadow / 112;
   if (lights.key.shadow.map) {
     lights.key.shadow.map.dispose();
     lights.key.shadow.map = null;

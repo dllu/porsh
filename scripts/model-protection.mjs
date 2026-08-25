@@ -33,13 +33,19 @@ const MAGIC = Buffer.from([0x50, 0x39, 0x35, 0x39, 0x45, 0x4e, 0x43, 0x00]);
 const BUNDLE_HEADER_BYTES = 16;
 const BUNDLE_FORMAT_VERSION = 1;
 const BUNDLE_MAGIC = Buffer.from([0x50, 0x39, 0x35, 0x39, 0x42, 0x4e, 0x44, 0x00]);
-const TEXTURE_PIPELINE_VERSION = 1;
+const TEXTURE_PIPELINE_VERSION = 2;
 const ASSET_VARIANT = 'advanced-v2';
 const MODEL_SCALE = 1;
 const EXCLUDED_TEXTURES = new Set([
   'wwc_background.jpg',
   'wwc_environment.exr',
   'wwc_floor_opacity.jpg',
+]);
+const LAMP_TEXTURES = new Set([
+  'glass-headlights_bump.jpg',
+  'glass-orange_normal.jpg',
+  'glass-red_normal.jpg',
+  'glass_reflector_normal_2.jpg',
 ]);
 
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -119,6 +125,10 @@ function classifyTexture(name) {
   return 'data';
 }
 
+function textureOrientation(name) {
+  return 'lower-left';
+}
+
 function textureResize(name) {
   if (/^interior-(common|fabric|leather|seats)_/i.test(name)) return '2048x2048';
   if (name === 'carpaint_Roughness.jpg') return '4096x4096';
@@ -135,6 +145,7 @@ function listTextureSources() {
       path: join(sourceTextureDirectory, name),
       outputName: name.replace(/\.[^.]+$/, '.ktx2'),
       role: classifyTexture(name),
+      orientation: textureOrientation(name),
       resize: textureResize(name),
     }));
 }
@@ -154,6 +165,7 @@ function collectSourceSignature(textureSources) {
         size: textureStat.size,
         modified: Math.trunc(textureStat.mtimeMs),
         role: texture.role,
+        orientation: texture.orientation,
         resize: texture.resize,
       };
     }),
@@ -213,7 +225,9 @@ function encodeTexture(toktx, texture, index, count) {
     '--zcmp', '18',
     '--genmipmap',
     '--filter', 'lanczos4',
-    '--lower_left_maps_to_s0t0',
+    texture.orientation === 'upper-left'
+      ? '--upper_left_maps_to_s0t0'
+      : '--lower_left_maps_to_s0t0',
     '--assign_oetf', transferFunction,
     '--assign_primaries', primaries,
     '--target_type', texture.role === 'specular' ? 'RGBA' : 'RGB',
@@ -237,9 +251,37 @@ function prepareWebTextures(textureSources, sourceSignature, rebuildTextures) {
     return previousManifest;
   }
 
-  const toktx = findToktx();
-  mkdirSync(webTextureDirectory, { recursive: true });
-  textureSources.forEach((texture, index) => encodeTexture(toktx, texture, index, textureSources.length));
+  const previousSignatures = new Map(
+    previousManifest?.sourceSignature?.textures?.map((texture) => [texture.name, texture]) ?? [],
+  );
+  const currentSignatures = new Map(
+    sourceSignature.textures.map((texture) => [texture.name, texture]),
+  );
+  const previousEntries = new Map(
+    previousManifest?.entries?.map((entry) => [entry.sourceName, entry]) ?? [],
+  );
+  const canReuseEntries = !rebuildTextures
+    && previousManifest?.pipelineVersion === TEXTURE_PIPELINE_VERSION;
+  const texturesToEncode = textureSources.filter((texture) => {
+    if (!canReuseEntries) return true;
+    const previousEntry = previousEntries.get(texture.name);
+    const outputPath = join(webTextureDirectory, texture.outputName);
+    return !signaturesMatch(
+      previousSignatures.get(texture.name),
+      currentSignatures.get(texture.name),
+    )
+      || previousEntry?.outputName !== texture.outputName
+      || !existsSync(outputPath)
+      || statSync(outputPath).size !== previousEntry.byteLength;
+  });
+
+  if (texturesToEncode.length > 0) {
+    const toktx = findToktx();
+    mkdirSync(webTextureDirectory, { recursive: true });
+    texturesToEncode.forEach((texture, index) => (
+      encodeTexture(toktx, texture, index, texturesToEncode.length)
+    ));
+  }
 
   const entries = textureSources.map((texture) => {
     const outputPath = join(webTextureDirectory, texture.outputName);
@@ -248,6 +290,7 @@ function prepareWebTextures(textureSources, sourceSignature, rebuildTextures) {
       sourceName: texture.name,
       outputName: texture.outputName,
       role: texture.role,
+      orientation: texture.orientation,
       byteLength: output.length,
       sha256: sha256(output),
     };
@@ -441,6 +484,15 @@ export function verifyProtectedModel() {
   if (payload.readUInt8(9) !== COMPRESSION_NONE) throw new Error('Protected model compression is unsupported.');
   const headerBytes = payload.readUInt16LE(10);
   if (headerBytes !== HEADER_BYTES) throw new Error('Protected model header length is invalid.');
+
+  const textureSignatures = new Map(
+    manifest.sourceSignature?.textures?.map((texture) => [texture.name, texture]) ?? [],
+  );
+  for (const name of LAMP_TEXTURES) {
+    if (textureSignatures.get(name)?.orientation !== 'lower-left') {
+      throw new Error(`Protected lamp atlas has an invalid orientation: ${name}`);
+    }
+  }
 
   const header = payload.subarray(0, headerBytes);
   const iv = header.subarray(16, 16 + IV_BYTES);
