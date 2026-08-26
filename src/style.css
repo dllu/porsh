@@ -458,10 +458,12 @@ body.has-interacted .interaction-hint {
   position: absolute;
   top: 94px;
   right: max(28px, env(safe-area-inset-right));
+  z-index: 12;
   width: min(375px, calc(100vw - 40px));
   max-height: calc(100vh - 126px);
   padding: 26px;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
   background: var(--panel);
@@ -1007,20 +1009,24 @@ body.is-ready .loading {
   }
 
   .settings {
-    top: auto;
+    --settings-top: max(86px, calc(env(safe-area-inset-top) + 48px));
+    --settings-bottom-gap: max(12px, env(safe-area-inset-bottom));
+    top: var(--settings-top);
     right: 10px;
-    bottom: max(10px, env(safe-area-inset-bottom));
+    bottom: auto;
     left: 10px;
     width: auto;
-    max-height: min(76vh, 650px);
+    max-height: calc(100vh - var(--settings-top) - var(--settings-bottom-gap));
+    max-height: calc(100dvh - var(--settings-top) - var(--settings-bottom-gap));
     padding: 23px;
     border-radius: 15px;
-    transform: translateY(30px) scale(0.98);
-    transform-origin: bottom center;
+    -webkit-overflow-scrolling: touch;
+    transform: translateY(-12px) scale(0.98);
+    transform-origin: top right;
   }
 
   body.is-ready .settings {
-    transform: translateY(30px) scale(0.98);
+    transform: translateY(-12px) scale(0.98);
   }
 
   body.is-ready .settings.is-open {
@@ -1038,6 +1044,13 @@ body.is-ready .loading {
 
   body.is-ready .camera-nav {
     transform: none;
+  }
+
+  body.is-ready.settings-open .camera-nav,
+  body.is-ready.settings-open .interaction-hint,
+  body.is-ready.settings-open .footer {
+    opacity: 0;
+    pointer-events: none;
   }
 
   .camera-nav button {

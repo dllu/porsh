@@ -1928,6 +1928,7 @@ function setupInterface() {
     settingsPanel.classList.toggle('is-open', open);
     settingsPanel.setAttribute('aria-hidden', String(!open));
     settingsButton.setAttribute('aria-expanded', String(open));
+    document.body.classList.toggle('settings-open', open);
   };
 
   const setCredits = (open) => {

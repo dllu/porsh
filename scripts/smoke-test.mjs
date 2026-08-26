@@ -129,6 +129,36 @@ try {
   if (mobileState.settingsVisible !== 'hidden') failures.push('mobile settings panel did not close');
   if (mobileState.cameraNavWidth > 380) failures.push(`mobile camera navigation overflowed (${mobileState.cameraNavWidth}px)`);
 
+  await page.locator('#settings-button').click();
+  await page.waitForSelector('#settings-panel.is-open', { state: 'visible' });
+  await page.evaluate(() => {
+    const panel = document.querySelector('#settings-panel');
+    panel.scrollTop = panel.scrollHeight;
+  });
+  const mobileSettingsState = await page.evaluate(() => {
+    const panel = document.querySelector('#settings-panel');
+    const quality = document.querySelector('.quality-setting');
+    const ultra = document.querySelector('[data-quality="ultra"]');
+    const panelBounds = panel.getBoundingClientRect();
+    const qualityBounds = quality.getBoundingClientRect();
+    const ultraBounds = ultra.getBoundingClientRect();
+    return {
+      panelTop: panelBounds.top,
+      panelBottom: panelBounds.bottom,
+      qualityBottom: qualityBounds.bottom,
+      cameraNavPointerEvents: getComputedStyle(document.querySelector('.camera-nav')).pointerEvents,
+      ultraHitTarget: document.elementFromPoint(
+        ultraBounds.left + ultraBounds.width / 2,
+        ultraBounds.top + ultraBounds.height / 2,
+      ) === ultra,
+    };
+  });
+  if (mobileSettingsState.panelTop > 130) failures.push(`mobile settings panel starts too low (${mobileSettingsState.panelTop}px)`);
+  if (mobileSettingsState.qualityBottom > mobileSettingsState.panelBottom) failures.push('mobile render quality controls are clipped');
+  if (mobileSettingsState.cameraNavPointerEvents !== 'none') failures.push('mobile camera navigation intercepts settings input');
+  if (!mobileSettingsState.ultraHitTarget) failures.push('mobile Ultra quality control is occluded');
+  await page.locator('#settings-close').click();
+
   if (failures.length) {
     throw new Error(failures.join('\n'));
   }
