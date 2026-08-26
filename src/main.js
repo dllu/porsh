@@ -780,7 +780,7 @@ function installCar(model, textures, studioReflectionMap, indicatorReflectionMap
     lampMaterials.reverseBulbs,
     lampMaterials.reverseReflectors,
   ));
-
+  car.add(createRearVentOccluder(wwcMaterials.get('shadow-planes')));
   scene.add(car);
   applyIndicatorIllumination(vehicleLightState.indicatorLit);
   applyRearLampState();
@@ -798,6 +798,18 @@ function prepareMaterial(material, anisotropy) {
     value.needsUpdate = true;
   }
   material.needsUpdate = true;
+}
+
+function createRearVentOccluder(material) {
+  // One continuous backing sits about 20 cm forward of the rear skin. Its side
+  // edges stay behind the bumper even in low, oblique views.
+  const occluder = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.24), material);
+  occluder.name = 'rear-vent-occluder';
+  occluder.position.set(0, 1.85, 0.36);
+  occluder.rotation.x = Math.PI / 2;
+  occluder.castShadow = false;
+  occluder.receiveShadow = false;
+  return occluder;
 }
 
 function createIndicatorLampInternals(
@@ -1130,6 +1142,15 @@ function createAdvancedMaterials(textures, studioReflectionMap, indicatorReflect
   };
   const materials = new Map();
   const add = (material) => {
+    // The FBX uses open shells for the wheel wells, underbody, and interior.
+    // Disable culling on modeled surfaces, but preserve every tuned glass side
+    // mode because those materials rely on screen-space transmission behavior.
+    if (
+      (material.isMeshStandardMaterial || material.isMeshPhysicalMaterial)
+      && !material.name.startsWith('glass-')
+    ) {
+      material.side = THREE.DoubleSide;
+    }
     materials.set(material.name, material);
     return material;
   };
@@ -1143,12 +1164,14 @@ function createAdvancedMaterials(textures, studioReflectionMap, indicatorReflect
     roughnessMap: texture('undercarriage_Roughness.jpg'),
     metalness: 0.08,
     envMapIntensity: 0.5,
+    side: THREE.DoubleSide,
   }));
   add(standard('shadow-planes', {
     color: 0x020203,
     metalness: 0,
     roughness: 1,
     envMapIntensity: 0,
+    side: THREE.DoubleSide,
   }));
 
   add(finishFrostedLensShell(physical('glass-reflector', {
