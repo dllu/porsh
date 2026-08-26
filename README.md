@@ -1,5 +1,7 @@
 # Porsche 959 — realtime study
 
+<img width="4096" height="2166" alt="porsche-959-profile(2)" src="https://github.com/user-attachments/assets/7e41465a-10e2-4362-8a04-a60276b6d929" />
+
 A high-quality, browser-based Three.js presentation of Wire Wheels Club's advanced 1987 Porsche 959 model. It uses the model's authored PBR texture set, an HDR studio, transmission/clearcoat, soft dynamic shadows, GTAO, bloom, adaptive resolution, animated camera presets, paint configuration, lights, fullscreen, and lossless screenshot capture.
 
 ## Run locally
