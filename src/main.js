@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -22,6 +22,9 @@ const loadingPercent = document.querySelector('#loading-percent');
 const loadingLabel = document.querySelector('#loading-label');
 const errorState = document.querySelector('#error-state');
 const toast = document.querySelector('#toast');
+const fpsCounter = document.querySelector('#fps-counter');
+const memoryConstrainedDevice = window.matchMedia('(pointer: coarse)').matches;
+let ready = false;
 
 const webglContext = canvas.getContext('webgl2', {
   alpha: false,
@@ -33,10 +36,22 @@ const webglContext = canvas.getContext('webgl2', {
 });
 
 if (!webglContext) {
-  document.querySelector('#loading-screen').hidden = true;
-  errorState.hidden = false;
+  showErrorState(
+    'This experience needs WebGL 2.',
+    'Try a current browser with hardware acceleration enabled.',
+  );
   throw new Error('WebGL 2 is unavailable.');
 }
+
+canvas.addEventListener('webglcontextlost', (event) => {
+  event.preventDefault();
+  ready = false;
+  resetFpsCounter();
+  showErrorState(
+    'The WebGL renderer stopped.',
+    'The browser lost its graphics context, usually because its GPU memory budget was exceeded. Reload after closing other graphics-heavy tabs.',
+  );
+});
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -261,14 +276,17 @@ let toastTimer = 0;
 let adaptiveSampleFrames = 0;
 let adaptiveSampleTime = 0;
 let adaptiveQualityChecked = false;
-let ready = false;
 let portraitLayout = false;
 let indicatorReflectionCalibration = null;
+let resizeFrame = 0;
+let fpsSampleStartedAt = 0;
+let fpsSampleFrames = 0;
+let smoothedFps = null;
 
 configureQuality('auto', false);
 setupInterface();
 resize();
-window.addEventListener('resize', resize, { passive: true });
+window.addEventListener('resize', scheduleResize, { passive: true });
 canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
 if (import.meta.env.DEV) {
@@ -312,7 +330,7 @@ loadExperience();
 async function loadExperience() {
   try {
     setLoadingLabel('Lighting the studio');
-    const [environment, model] = await Promise.all([
+    let [environment, model] = await Promise.all([
       loadEnvironment(),
       loadModel(),
     ]);
@@ -322,7 +340,7 @@ async function loadExperience() {
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     pmremGenerator.compileEquirectangularShader();
     const environmentMap = pmremGenerator.fromEquirectangular(environment).texture;
-    const indicatorReflectionEnvironment = createIndicatorReflectionEnvironment(environment);
+    let indicatorReflectionEnvironment = createIndicatorReflectionEnvironment(environment);
     indicatorReflectionCalibration = { ...indicatorReflectionEnvironment.userData };
     const indicatorReflectionMap = pmremGenerator
       .fromEquirectangular(indicatorReflectionEnvironment)
@@ -331,17 +349,19 @@ async function loadExperience() {
     environment.dispose();
     indicatorReflectionEnvironment.dispose();
     pmremGenerator.dispose();
+    environment = null;
+    indicatorReflectionEnvironment = null;
 
-    installCar(model.scene, model.textures, environmentMap, indicatorReflectionMap);
+    const modelRoot = model.scene;
+    installCar(modelRoot, model.textures, environmentMap, indicatorReflectionMap);
+    releaseStaticGeometryCpuDataAfterUpload(modelRoot);
+    await uploadMaterialTextures(model.textures);
+    model = null;
     setStudioRotation(18);
     setLoadingLabel('Compiling materials');
     setProgress('model', 0.96);
-
-    if (renderer.compileAsync) {
-      await renderer.compileAsync(scene, camera);
-    } else {
-      renderer.compile(scene, camera);
-    }
+    await compileExperienceMaterials();
+    await uploadStaticGeometryIncrementally(modelRoot);
 
     renderer.shadowMap.needsUpdate = true;
     composer.render(0);
@@ -356,10 +376,10 @@ async function loadExperience() {
     canvas.focus({ preventScroll: true });
   } catch (error) {
     console.error(error);
-    document.querySelector('#loading-screen').hidden = true;
-    errorState.hidden = false;
-    errorState.querySelector('h2').textContent = 'The 3D assets could not be loaded.';
-    errorState.querySelector('p').textContent = 'Check the protected model setup and refresh the page.';
+    showErrorState(
+      'The 3D assets could not be loaded.',
+      'The browser may have exhausted its memory budget while preparing the model. Close other tabs and refresh the page.',
+    );
   }
 }
 
@@ -375,6 +395,156 @@ function loadEnvironment() {
       reject,
     );
   });
+}
+
+async function uploadMaterialTextures(textures) {
+  if (!memoryConstrainedDevice) return;
+
+  const uniqueTextures = [...new Set(textures.values())];
+  setLoadingLabel(`Uploading ${uniqueTextures.length} PBR maps`);
+
+  for (let index = 0; index < uniqueTextures.length; index += 1) {
+    const texture = uniqueTextures[index];
+    if (texture.isCompressedTexture) {
+      // Mobile browsers can otherwise retain both the transcoded mip chain and
+      // its GPU copy through the most memory-intensive part of startup.
+      texture.onUpdate = (uploadedTexture) => {
+        uploadedTexture.mipmaps.length = 0;
+        uploadedTexture.onUpdate = null;
+      };
+    }
+    renderer.initTexture(texture);
+    setProgress('model', 0.94 + ((index + 1) / uniqueTextures.length) * 0.015);
+    if ((index + 1) % 2 === 0) await yieldToBrowser();
+  }
+}
+
+function releaseStaticGeometryCpuDataAfterUpload(root) {
+  if (!memoryConstrainedDevice) return;
+
+  const preparedBuffers = new Set();
+  root.traverse((object) => {
+    const geometry = object.geometry;
+    if (!geometry?.isBufferGeometry) return;
+
+    // Frustum culling must not need the vertex arrays after their first upload.
+    if (!geometry.boundingBox) geometry.computeBoundingBox();
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+
+    const attributes = [
+      geometry.index,
+      ...Object.values(geometry.attributes),
+      ...Object.values(geometry.morphAttributes).flat(),
+    ];
+
+    attributes.filter(Boolean).forEach((attribute) => {
+      const buffer = attribute.isInterleavedBufferAttribute ? attribute.data : attribute;
+      if (preparedBuffers.has(buffer)) return;
+      preparedBuffers.add(buffer);
+      const previousOnUpload = buffer.onUploadCallback;
+      buffer.onUpload(function releaseCpuArray() {
+        previousOnUpload.call(this);
+        this.array = null;
+      });
+    });
+  });
+}
+
+async function uploadStaticGeometryIncrementally(root) {
+  if (!memoryConstrainedDevice) return;
+
+  const targets = [];
+  const originalStates = new Map();
+  root.traverse((object) => {
+    if (!object.isMesh) return;
+    originalStates.set(object, {
+      visible: object.visible,
+      frustumCulled: object.frustumCulled,
+    });
+    if (!object.geometry || !object.material) return;
+    let ancestor = object;
+    while (ancestor && ancestor !== root.parent) {
+      if (!ancestor.visible) return;
+      ancestor = ancestor.parent;
+    }
+    targets.push(object);
+  });
+
+  targets.forEach((object) => {
+    object.visible = false;
+  });
+
+  try {
+    for (let index = 0; index < targets.length; index += 1) {
+      const target = targets[index];
+      const activatedMeshes = [];
+      let ancestor = target;
+      while (ancestor && ancestor !== root.parent) {
+        if (ancestor.isMesh) {
+          ancestor.visible = true;
+          ancestor.frustumCulled = false;
+          activatedMeshes.push(ancestor);
+        }
+        ancestor = ancestor.parent;
+      }
+
+      setLoadingLabel(`Uploading geometry ${index + 1}/${targets.length}`);
+      renderer.render(scene, camera);
+      setProgress('model', 0.985 + ((index + 1) / targets.length) * 0.01);
+      activatedMeshes.forEach((object) => {
+        object.visible = false;
+      });
+      await yieldToBrowser();
+    }
+  } finally {
+    originalStates.forEach((state, object) => {
+      object.visible = state.visible;
+      object.frustumCulled = state.frustumCulled;
+    });
+  }
+}
+
+async function compileExperienceMaterials() {
+  const compileObject = async (object, targetScene = null) => {
+    if (renderer.compileAsync) {
+      await renderer.compileAsync(object, camera, targetScene);
+    } else {
+      renderer.compile(object, camera, targetScene);
+    }
+  };
+
+  if (!memoryConstrainedDevice) {
+    await compileObject(scene);
+    return;
+  }
+
+  const targets = [];
+  const preparedMaterials = new Set();
+  scene.traverse((object) => {
+    if (!(object.isMesh || object.isPoints || object.isLine || object.isSprite)) return;
+    const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    if (!objectMaterials.some((material) => material && !preparedMaterials.has(material))) return;
+    objectMaterials.filter(Boolean).forEach((material) => preparedMaterials.add(material));
+    targets.push(object);
+  });
+
+  for (let index = 0; index < targets.length; index += 1) {
+    setLoadingLabel(`Compiling materials ${index + 1}/${targets.length}`);
+    await compileObject(targets[index], scene);
+    setProgress('model', 0.96 + ((index + 1) / targets.length) * 0.025);
+    await yieldToBrowser();
+  }
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+function showErrorState(title, message) {
+  document.querySelector('#loading-screen').hidden = true;
+  errorState.hidden = false;
+  errorState.querySelector('h2').textContent = title;
+  errorState.querySelector('p').textContent = message;
 }
 
 function attenuateEnvironmentGroundHemisphere(environment) {
@@ -547,13 +717,27 @@ async function loadModel() {
   setProgress('model', 0.89);
   setLoadingLabel('Building 2.19m triangles');
 
-  // Let the loading UI paint before the necessarily synchronous FBX parse.
+  // Let the loading UI paint before parsing the indexed geometry container.
   await new Promise((resolve) => requestAnimationFrame(resolve));
+  if (MODEL_META.modelFormat !== 'glb') throw new Error('Protected model geometry format is unsupported.');
   const manager = new THREE.LoadingManager();
-  manager.setURLModifier(() => 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=');
-  const result = new FBXLoader(manager).parse(bundle.model, '');
+  let modelBuffer = bundle.model;
   bundle.model = null;
+  const result = await new Promise((resolve, reject) => {
+    new GLTFLoader(manager).parse(modelBuffer, '', (gltf) => {
+      const [sourceRoot] = gltf.scene.children;
+      if (gltf.scene.children.length !== 1 || sourceRoot.name !== '87-POR-959') {
+        reject(new Error('Indexed model root does not match the source FBX hierarchy.'));
+        return;
+      }
+      // GLTFLoader supplies an identity scene wrapper. Runtime lamp and vent
+      // helpers use coordinates relative to the preserved Z-up FBX root.
+      resolve(sourceRoot);
+    }, reject);
+  });
+  modelBuffer = null;
   setProgress('model', 0.94);
+  if (memoryConstrainedDevice) await yieldToBrowser();
   return { scene: result, textures };
 }
 
@@ -563,29 +747,42 @@ async function loadMaterialTextures(textureAssets) {
   }
 
   setLoadingLabel(`Transcoding ${textureAssets.length} PBR maps`);
+  const workerLimit = Math.max(1, Math.min(
+    navigator.hardwareConcurrency || 4,
+    memoryConstrainedDevice ? 2 : 4,
+  ));
   const loader = new KTX2Loader()
     .setTranscoderPath(import.meta.env.DEV ? `${import.meta.env.BASE_URL}basis/` : '')
-    .setWorkerLimit(Math.min(navigator.hardwareConcurrency || 4, 4))
+    .setWorkerLimit(workerLimit)
     .detectSupport(renderer);
   const textures = new Map();
   let loadedTextures = 0;
+  let nextAssetIndex = 0;
 
   try {
-    await Promise.all(textureAssets.map((asset) => new Promise((resolve, reject) => {
-      loader.parse(
-        asset.payload,
-        (texture) => {
-          texture.name = asset.name;
-          texture.flipY = false;
-          texture.userData.role = asset.role;
-          textures.set(asset.name, texture);
-          loadedTextures += 1;
-          setProgress('model', 0.7 + (loadedTextures / textureAssets.length) * 0.18);
-          resolve();
-        },
-        reject,
-      );
-    })));
+    const transcodeNext = async () => {
+      while (nextAssetIndex < textureAssets.length) {
+        const asset = textureAssets[nextAssetIndex];
+        nextAssetIndex += 1;
+        let payload = asset.payload;
+        asset.payload = null;
+
+        const texture = await new Promise((resolve, reject) => {
+          loader.parse(payload, resolve, reject);
+        });
+        payload = null;
+        texture.name = asset.name;
+        texture.flipY = false;
+        texture.userData.role = asset.role;
+        textures.set(asset.name, texture);
+        loadedTextures += 1;
+        setProgress('model', 0.7 + (loadedTextures / textureAssets.length) * 0.18);
+        if (memoryConstrainedDevice) await yieldToBrowser();
+      }
+    };
+
+    await Promise.all(Array.from({ length: workerLimit }, transcodeNext));
+    textureAssets.length = 0;
   } finally {
     loader.dispose();
   }
@@ -2107,10 +2304,11 @@ function configureQuality(mode, announce = true) {
   adaptiveQualityChecked = mode !== 'auto';
   adaptiveSampleFrames = 0;
   adaptiveSampleTime = 0;
+  resetFpsCounter();
 
   const cores = navigator.hardwareConcurrency ?? 4;
   const memory = navigator.deviceMemory ?? 4;
-  const mobile = window.matchMedia('(max-width: 760px)').matches;
+  const mobile = memoryConstrainedDevice || window.matchMedia('(max-width: 760px)').matches;
   const nativePixelRatio = window.devicePixelRatio || 1;
   const maxSamples = renderer.capabilities.maxSamples;
   let profile;
@@ -2186,6 +2384,14 @@ function adaptQuality(delta) {
   }
 }
 
+function scheduleResize() {
+  if (resizeFrame) return;
+  resizeFrame = window.requestAnimationFrame(() => {
+    resizeFrame = 0;
+    resize();
+  });
+}
+
 function resize() {
   const width = window.innerWidth;
   const height = window.innerHeight;
@@ -2202,14 +2408,51 @@ function resize() {
   }
 }
 
+function updateFpsCounter(timestamp) {
+  if (!fpsSampleStartedAt) {
+    fpsSampleStartedAt = timestamp;
+    fpsSampleFrames = 0;
+    return;
+  }
+
+  fpsSampleFrames += 1;
+  const elapsed = timestamp - fpsSampleStartedAt;
+  if (elapsed < 500) return;
+
+  const sampledFps = (fpsSampleFrames * 1000) / elapsed;
+  smoothedFps = smoothedFps === null
+    ? sampledFps
+    : THREE.MathUtils.lerp(smoothedFps, sampledFps, 0.35);
+  fpsCounter.value = `${Math.round(smoothedFps)} FPS`;
+  fpsCounter.title = `${smoothedFps.toFixed(1)} frames per second`;
+  fpsCounter.classList.toggle('is-low', smoothedFps < 50 && smoothedFps >= 30);
+  fpsCounter.classList.toggle('is-critical', smoothedFps < 30);
+  fpsSampleStartedAt = timestamp;
+  fpsSampleFrames = 0;
+}
+
+function resetFpsCounter() {
+  fpsSampleStartedAt = 0;
+  fpsSampleFrames = 0;
+  smoothedFps = null;
+  fpsCounter.value = '-- FPS';
+  fpsCounter.removeAttribute('title');
+  fpsCounter.classList.remove('is-low', 'is-critical');
+}
+
 function render(timestamp) {
   const delta = Math.min(clock.getDelta(), 0.05);
+  if (!ready || document.hidden) {
+    if (document.hidden) resetFpsCounter();
+    return;
+  }
   updateCameraTween(delta);
   controls.update(delta);
   updateIndicators(timestamp * 0.001);
-  updateHeadlightEmission();
+  if (vehicleLightState.headlights) updateHeadlightEmission();
   composer.render(delta);
   adaptQuality(delta);
+  updateFpsCounter(timestamp);
 }
 
 async function toggleFullscreen() {

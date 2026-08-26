@@ -436,8 +436,22 @@ body.has-interacted .interaction-hint {
   text-transform: uppercase;
 }
 
-.footer p i {
-  order: -1;
+.footer output {
+  min-width: 47px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.58);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.1em;
+  text-align: right;
+}
+
+.footer output.is-low {
+  color: #e6b55e;
+}
+
+.footer output.is-critical {
+  color: #ed6872;
 }
 
 .settings {
@@ -953,12 +967,13 @@ body.is-ready .loading {
     display: none;
   }
 
-  .footer p {
+  .footer .render-summary,
+  .footer p i {
     display: none;
   }
 
   .footer {
-    right: auto;
+    right: max(18px, env(safe-area-inset-right));
     bottom: max(25px, calc(env(safe-area-inset-bottom) + 13px));
   }
 

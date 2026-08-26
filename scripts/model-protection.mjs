@@ -34,7 +34,8 @@ const BUNDLE_HEADER_BYTES = 16;
 const BUNDLE_FORMAT_VERSION = 1;
 const BUNDLE_MAGIC = Buffer.from([0x50, 0x39, 0x35, 0x39, 0x42, 0x4e, 0x44, 0x00]);
 const TEXTURE_PIPELINE_VERSION = 2;
-const ASSET_VARIANT = 'advanced-v2';
+const GEOMETRY_PIPELINE_VERSION = 2;
+const ASSET_VARIANT = 'advanced-v2-indexed';
 const MODEL_SCALE = 1;
 const EXCLUDED_TEXTURES = new Set([
   'wwc_background.jpg',
@@ -51,12 +52,14 @@ const LAMP_TEXTURES = new Set([
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const localModelDirectory = join(projectRoot, 'local-models', 'wwc-advanced');
 export const sourceModelPath = join(localModelDirectory, '87_POR_959_wwc_ADV_v2.fbx');
+export const indexedModelPath = join(localModelDirectory, '87_POR_959_wwc_ADV_v2.indexed.glb');
 export const sourceLicensePath = join(localModelDirectory, 'License.txt');
 export const sourceTextureDirectory = join(localModelDirectory, 'textures');
 export const webTextureDirectory = join(localModelDirectory, 'web-textures');
 export const protectedModelDirectory = join(projectRoot, 'public', 'models', 'protected');
 export const manifestPath = join(localModelDirectory, 'protection-manifest.json');
 const texturePipelineManifestPath = join(localModelDirectory, 'texture-pipeline.json');
+const geometryPipelineManifestPath = join(localModelDirectory, 'geometry-pipeline.json');
 
 function sha256(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -174,6 +177,61 @@ function collectSourceSignature(textureSources) {
 
 function signaturesMatch(first, second) {
   return JSON.stringify(first) === JSON.stringify(second);
+}
+
+function geometryPipelineIsCurrent(manifest, modelSignature) {
+  if (
+    manifest?.pipelineVersion !== GEOMETRY_PIPELINE_VERSION
+    || !signaturesMatch(manifest.sourceModel, modelSignature)
+    || !existsSync(indexedModelPath)
+  ) return false;
+
+  const output = readFileSync(indexedModelPath);
+  return output.length === manifest.byteLength && sha256(output) === manifest.sha256;
+}
+
+function prepareIndexedModel(modelSignature) {
+  const previousManifest = readJson(geometryPipelineManifestPath);
+  if (geometryPipelineIsCurrent(previousManifest, modelSignature)) {
+    console.log(`Indexed geometry is current (${(previousManifest.byteLength / 1_000_000).toFixed(1)} MB GLB).`);
+    return previousManifest;
+  }
+
+  const temporaryOutputPath = `${indexedModelPath}.${process.pid}.tmp`;
+  rmSync(temporaryOutputPath, { force: true });
+  console.log('Indexing FBX geometry for the protected web model...');
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--max-old-space-size=8192',
+      join(projectRoot, 'scripts', 'build-indexed-model.mjs'),
+      sourceModelPath,
+      temporaryOutputPath,
+    ],
+    { stdio: 'inherit' },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0 || !existsSync(temporaryOutputPath)) {
+    rmSync(temporaryOutputPath, { force: true });
+    throw new Error(`Indexed geometry build failed (exit ${result.status}).`);
+  }
+
+  const output = readFileSync(temporaryOutputPath);
+  if (output.length < 1_000_000) {
+    rmSync(temporaryOutputPath, { force: true });
+    throw new Error('Indexed geometry output is unexpectedly small.');
+  }
+  renameSync(temporaryOutputPath, indexedModelPath);
+  const manifest = {
+    pipelineVersion: GEOMETRY_PIPELINE_VERSION,
+    sourceModel: modelSignature,
+    outputName: '87_POR_959_wwc_ADV_v2.indexed.glb',
+    byteLength: output.length,
+    sha256: sha256(output),
+    generatedAt: new Date().toISOString(),
+  };
+  writeJsonAtomically(geometryPipelineManifestPath, manifest);
+  return manifest;
 }
 
 function findToktx() {
@@ -329,8 +387,8 @@ function buildAssetBundle(model, textureManifest) {
       buffer: model,
       metadata: {
         kind: 'model',
-        name: '87_POR_959_wwc_ADV_v2.fbx',
-        mimeType: 'application/octet-stream',
+        name: '87_POR_959_wwc_ADV_v2.indexed.glb',
+        mimeType: 'model/gltf-binary',
         byteLength: model.length,
       },
     },
@@ -348,7 +406,7 @@ function buildAssetBundle(model, textureManifest) {
   return Buffer.concat([header, directory, ...assets.map((asset) => asset.buffer)]);
 }
 
-function validateAssetBundle(bundle, expectedTextureCount) {
+function validateAssetBundle(bundle, expectedTextureCount, expectedModelFormat) {
   if (bundle.length < BUNDLE_HEADER_BYTES || !bundle.subarray(0, BUNDLE_MAGIC.length).equals(BUNDLE_MAGIC)) {
     throw new Error('Protected asset bundle header is invalid.');
   }
@@ -368,6 +426,13 @@ function validateAssetBundle(bundle, expectedTextureCount) {
     || textureEntries.length !== expectedTextureCount
     || dataOffset + declaredBytes !== bundle.length
   ) throw new Error('Protected asset bundle contents are invalid.');
+  if (
+    expectedModelFormat === 'glb'
+    && (
+      modelEntries[0].mimeType !== 'model/gltf-binary'
+      || !modelEntries[0].name.endsWith('.glb')
+    )
+  ) throw new Error('Protected asset bundle does not contain indexed GLB geometry.');
   return directory;
 }
 
@@ -376,6 +441,8 @@ function previousPayloadIsCurrent(manifest, sourceSignature) {
   return manifest?.formatVersion === FORMAT_VERSION
     && manifest?.assetVariant === ASSET_VARIANT
     && manifest?.texturePipelineVersion === TEXTURE_PIPELINE_VERSION
+    && manifest?.geometryPipelineVersion === GEOMETRY_PIPELINE_VERSION
+    && manifest?.modelFormat === 'glb'
     && signaturesMatch(manifest?.sourceSignature, sourceSignature)
     && payloadPath
     && existsSync(payloadPath)
@@ -402,9 +469,11 @@ export function protectModel({ force = false, rebuildTextures = false } = {}) {
   }
 
   const textureManifest = prepareWebTextures(textureSources, sourceSignature, rebuildTextures);
-  const model = readFileSync(sourceModelPath);
-  console.log(`Bundling ${Math.round(model.length / 1_000_000)} MB FBX with ${textureManifest.entries.length} KTX2 maps...`);
+  const geometryManifest = prepareIndexedModel(sourceSignature.model);
+  const model = readFileSync(indexedModelPath);
+  console.log(`Bundling ${Math.round(model.length / 1_000_000)} MB indexed GLB with ${textureManifest.entries.length} KTX2 maps...`);
   const bundle = buildAssetBundle(model, textureManifest);
+  validateAssetBundle(bundle, textureManifest.entries.length, 'glb');
   const sourceSha256 = sha256(bundle);
   const key = randomBytes(KEY_BYTES);
   const iv = randomBytes(IV_BYTES);
@@ -437,12 +506,16 @@ export function protectModel({ force = false, rebuildTextures = false } = {}) {
     compression: 'none',
     textureEncoding: 'KTX2/UASTC',
     texturePipelineVersion: TEXTURE_PIPELINE_VERSION,
+    geometryPipelineVersion: GEOMETRY_PIPELINE_VERSION,
+    modelFormat: 'glb',
     textureCount: textureManifest.entries.length,
     payloadFile,
     publicPath,
     payloadBytes: payload.length,
     sourceBytes: bundle.length,
     modelSourceBytes: model.length,
+    originalModelSourceBytes: sourceSignature.model.size,
+    modelSha256: geometryManifest.sha256,
     sourceSha256,
     payloadSha256,
     sourceSignature,
@@ -510,6 +583,6 @@ export function verifyProtectedModel() {
     throw new Error('Protected model decrypted to an unexpected size.');
   }
   if (sha256(bundle) !== manifest.sourceSha256) throw new Error('Protected model checksum does not match.');
-  validateAssetBundle(bundle, manifest.textureCount);
+  validateAssetBundle(bundle, manifest.textureCount, manifest.modelFormat);
   return manifest;
 }

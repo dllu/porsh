@@ -37,6 +37,7 @@ function protectedModelPlugin(manifest) {
     payloadBytes: manifest.payloadBytes,
     sourceBytes: manifest.sourceBytes,
     modelScale: manifest.modelScale,
+    modelFormat: manifest.modelFormat,
     textureCount: manifest.textureCount,
     assetVariant: manifest.assetVariant,
   };

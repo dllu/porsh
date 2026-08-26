@@ -25,9 +25,9 @@ the front, rear, and side lamps under `render-tests/`. Set
 comma-separated `P959_RENDER_STATES` list to render only named frames shown in
 `scripts/render-test.mjs`.
 
-The setup command keeps the plaintext FBX, source textures, and local license under the Git-ignored `local-models/wwc-advanced/` directory. It prepares 54 GPU-compressed KTX2/UASTC maps with mipmaps, bundles them with the FBX, and authenticates/encrypts the bundle with AES-256-GCM. Only a content-addressed `.p9e` payload is written beneath the Git-ignored `public/models/protected/` directory.
+The setup command keeps the plaintext FBX, source textures, and local license under the Git-ignored `local-models/wwc-advanced/` directory. It losslessly indexes the static FBX geometry into a local GLB, prepares 54 GPU-compressed KTX2/UASTC maps with mipmaps, and authenticates/encrypts the bundle with AES-256-GCM. Only a content-addressed `.p9e` payload is written beneath the Git-ignored `public/models/protected/` directory.
 
-The first setup is CPU-intensive because it encodes the full texture set. Later runs reuse the prepared maps. Use `npm run setup:model -- /path/to/archive.zip --rebuild-textures` only when you intentionally want to regenerate every KTX2 map.
+The first setup is CPU-intensive because it indexes the geometry and encodes the full texture set. Later runs reuse both prepared artifacts. Use `npm run setup:model -- /path/to/archive.zip --rebuild-textures` only when you intentionally want to regenerate every KTX2 map.
 
 `npm run dev` and `npm run build` automatically verify that the protected payload matches the local source model. To rotate the generated key and payload, run:
 
@@ -46,7 +46,7 @@ Upload the **contents of `dist/`** to the desired directory on the web server. N
 
 Serve production deployments over HTTPS because browser decryption uses Web Crypto; Vite's local HTTP origin is also accepted by browsers as a secure context. Do not open the build directly from a `file://` URL. No single-page-app fallback rules are needed because the viewer has no client-side routes. The server may serve `.p9e` as `application/octet-stream`; enable that MIME type if a host rejects unknown extensions. The hashed payload can safely receive a long-lived immutable cache header.
 
-At runtime, a Web Worker reconstructs the split key, authenticates and decrypts the payload, and unpacks the model and textures in memory. Three.js transcodes the KTX2 maps directly to a GPU-supported compressed format. The browser never makes a plaintext FBX or texture request, and the production build does not contain standalone `.fbx`, `.jpg`, `.png`, or `.ktx2` files.
+At runtime, a Web Worker reconstructs the split key, authenticates and decrypts the payload, and unpacks the model and textures in memory. Three.js loads the indexed geometry and transcodes the KTX2 maps directly to a GPU-supported compressed format. The browser never makes a plaintext model or texture request, and the production build does not contain standalone `.fbx`, `.glb`, `.jpg`, `.png`, or `.ktx2` files.
 
 This is obfuscation, not DRM: because the browser must eventually receive the key, geometry, and textures, a determined user can still recover the assets from memory or instrument the loader. Encryption does not grant publication rights or override the purchased model's license. Review the license included with your archive and the [Wire Wheels Club license page](https://wirewheelsclub.com/license/) before publishing a build containing the protected payload.
 

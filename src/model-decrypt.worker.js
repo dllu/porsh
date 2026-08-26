@@ -82,9 +82,11 @@ self.onmessage = async (event) => {
   let key;
   let keyShareA;
   let keyShareB;
+  let payload;
+  let decrypted;
 
   try {
-    const payload = new Uint8Array(event.data.payload);
+    payload = new Uint8Array(event.data.payload);
     keyShareA = new Uint8Array(event.data.keyShareA);
     keyShareB = decodeBase64(encodedKeyShareB).reverse();
 
@@ -92,7 +94,9 @@ self.onmessage = async (event) => {
       throw new Error('Protected model header is invalid.');
     }
 
-    const header = payload.subarray(0, HEADER_BYTES);
+    // Copy the tiny authenticated header so it does not retain the complete
+    // encrypted payload after decryption finishes.
+    const header = payload.slice(0, HEADER_BYTES);
     const headerView = new DataView(header.buffer, header.byteOffset, header.byteLength);
     if (headerView.getUint8(8) !== FORMAT_VERSION || headerView.getUint8(9) !== COMPRESSION_NONE) {
       throw new Error('Protected model format is unsupported.');
@@ -112,7 +116,7 @@ self.onmessage = async (event) => {
 
     self.postMessage({ type: 'phase', phase: 'decrypting' });
     const cryptoKey = await crypto.subtle.importKey('raw', key, 'AES-GCM', false, ['decrypt']);
-    const decrypted = await crypto.subtle.decrypt(
+    decrypted = await crypto.subtle.decrypt(
       {
         name: 'AES-GCM',
         iv: header.subarray(16, 28),
@@ -122,6 +126,8 @@ self.onmessage = async (event) => {
       cryptoKey,
       payload.subarray(HEADER_BYTES),
     );
+    payload = null;
+    event.data.payload = null;
 
     self.postMessage({ type: 'phase', phase: 'unpacking' });
     const expectedBytes = headerView.getUint32(12, true);
@@ -129,6 +135,7 @@ self.onmessage = async (event) => {
       throw new Error('Protected model bundle size is invalid.');
     }
     const unpacked = unpackBundle(decrypted, expectedBytes);
+    decrypted = null;
     self.postMessage(
       { type: 'complete', model: unpacked.model, textures: unpacked.textures },
       unpacked.transfer,
@@ -142,5 +149,7 @@ self.onmessage = async (event) => {
     key?.fill(0);
     keyShareA?.fill(0);
     keyShareB?.fill(0);
+    payload = null;
+    decrypted = null;
   }
 };

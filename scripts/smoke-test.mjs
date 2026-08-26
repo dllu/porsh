@@ -64,7 +64,7 @@ try {
   page.on('request', (request) => assetRequests.push(request.url()));
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  // The advanced WWC FBX is 2.19m triangles. Select balanced mode before shader compilation
+  // The advanced WWC model is 2.19m triangles. Select balanced mode before shader compilation
   // so the software-rendered CI check remains practical; local smoke runs use the GPU.
   if (useSoftwareRenderer) {
     await page.evaluate(() => document.querySelector('[data-quality="balanced"]').click());
@@ -83,7 +83,7 @@ try {
   if (!state.ready) failures.push('viewer did not reach its ready state');
   if (state.activeView !== 'HERO') failures.push(`view: expected HERO, got ${state.activeView}`);
   if (!assetRequests.some((requestUrl) => requestUrl.endsWith('.p9e'))) failures.push('protected model payload was not requested');
-  if (assetRequests.some((requestUrl) => requestUrl.toLowerCase().endsWith('.fbx'))) failures.push('plaintext FBX was requested');
+  if (assetRequests.some((requestUrl) => /\.(?:fbx|glb)(?:$|\?)/i.test(requestUrl))) failures.push('plaintext model geometry was requested');
   if (assetRequests.some((requestUrl) => /\.(?:jpe?g|png|ktx2)(?:$|\?)/i.test(requestUrl))) failures.push('standalone paid texture was requested');
 
   await page.waitForTimeout(600);
