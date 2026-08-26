@@ -12,6 +12,8 @@
     "setup:model": "node scripts/setup-model.mjs",
     "protect:model": "node scripts/protect-model.mjs",
     "test:protection": "node scripts/verify-model-protection.mjs",
+    "pretest:render": "npm run protect:model",
+    "test:render": "node scripts/render-test.mjs",
     "pretest:smoke": "npm run protect:model",
     "test:smoke": "node scripts/smoke-test.mjs"
   },

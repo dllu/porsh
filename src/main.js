@@ -130,6 +130,10 @@ const progress = { model: 0, environment: 0 };
 const clock = new THREE.Clock();
 const INDICATOR_PERIOD = 0.72;
 const INDICATOR_ON_TIME = 0.36;
+// Keep lamp brightness local to the emitters so bloom responds to their HDR
+// radiance without changing the camera response for paint and studio highlights.
+const ACTIVE_LAMP_RADIANCE_SCALE = 8;
+const INDICATOR_REFLECTION_PEAK_MULTIPLIER = 2.5;
 const headlightCenter = new THREE.Vector3(0, 0.68, 1.88);
 const headlightTarget = new THREE.Vector3(0, 0.25, 9);
 const headlightViewDirection = new THREE.Vector3();
@@ -225,28 +229,29 @@ let bodyMaterial = null;
 let bodyRoughnessMap = null;
 const lampMaterials = {
   headlights: null,
-  indicatorBase: null,
-  indicatorEnds: null,
-  indicatorBulbs: null,
+  indicatorReflectorsOff: null,
   indicatorReflectors: null,
-  sideIndicatorBulbs: null,
-  sideIndicatorReflectors: null,
-  tailCenter: null,
+  indicatorHotspots: null,
+  sideIndicatorHotspots: null,
   tailBulbs: null,
   tailLampReflectors: null,
-  tailBrake: null,
-  tailOuter: null,
-  reverseLens: null,
   reverseBulbs: null,
   reverseReflectors: null,
+};
+const lampMeshes = {
+  indicatorLenses: [],
 };
 const vehicleLightState = {
   headlights: false,
   indicators: false,
   brakes: false,
   reverse: false,
-  indicatorElapsed: 0,
+  indicatorStartedAt: 0,
   indicatorLit: false,
+};
+const indicatorRenderComponents = {
+  reflections: true,
+  hotspots: true,
 };
 let cameraTween = null;
 let activeView = 'hero';
@@ -258,6 +263,7 @@ let adaptiveSampleTime = 0;
 let adaptiveQualityChecked = false;
 let ready = false;
 let portraitLayout = false;
+let indicatorReflectionCalibration = null;
 
 configureQuality('auto', false);
 setupInterface();
@@ -287,6 +293,16 @@ if (import.meta.env.DEV) {
     getLightState() {
       return { ...vehicleLightState };
     },
+    getIndicatorReflectionCalibration() {
+      return indicatorReflectionCalibration
+        ? { ...indicatorReflectionCalibration }
+        : null;
+    },
+    setIndicatorComponents(components = {}) {
+      indicatorRenderComponents.reflections = components.reflections !== false;
+      indicatorRenderComponents.hotspots = components.hotspots !== false;
+      applyIndicatorIllumination(vehicleLightState.indicatorLit);
+    },
   };
 }
 
@@ -306,11 +322,17 @@ async function loadExperience() {
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     pmremGenerator.compileEquirectangularShader();
     const environmentMap = pmremGenerator.fromEquirectangular(environment).texture;
+    const indicatorReflectionEnvironment = createIndicatorReflectionEnvironment(environment);
+    indicatorReflectionCalibration = { ...indicatorReflectionEnvironment.userData };
+    const indicatorReflectionMap = pmremGenerator
+      .fromEquirectangular(indicatorReflectionEnvironment)
+      .texture;
     scene.environment = environmentMap;
     environment.dispose();
+    indicatorReflectionEnvironment.dispose();
     pmremGenerator.dispose();
 
-    installCar(model.scene, model.textures);
+    installCar(model.scene, model.textures, environmentMap, indicatorReflectionMap);
     setStudioRotation(18);
     setLoadingLabel('Compiling materials');
     setProgress('model', 0.96);
@@ -381,6 +403,137 @@ function attenuateEnvironmentGroundHemisphere(environment) {
   }
 
   environment.needsUpdate = true;
+}
+
+function createIndicatorReflectionEnvironment(studioEnvironment) {
+  const width = 1024;
+  const height = 512;
+  const signal = new Float32Array(width * height);
+  const data = studioEnvironment.type === THREE.HalfFloatType
+    ? new Uint16Array(width * height * 4)
+    : new Float32Array(width * height * 4);
+  // One source lobe faces each front, rear, and side housing. The lobes are
+  // deliberately broad enough to illuminate the concave reflector while
+  // retaining a direction-dependent highlight instead of becoming a flat fill.
+  const lobeCenters = [0, 0.25, 0.5, 0.75];
+  let signalPeak = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    const v = (y + 0.5) / height;
+    const dv = v - 0.5;
+
+    for (let x = 0; x < width; x += 1) {
+      const u = (x + 0.5) / width;
+      let du = 1;
+      lobeCenters.forEach((center) => {
+        const wrapped = ((((u - center) + 0.5) % 1) + 1) % 1 - 0.5;
+        if (Math.abs(wrapped) < Math.abs(du)) du = wrapped;
+      });
+
+      // A localized source represents the bulb itself. Reflector curvature,
+      // the authored normal map, and PMREM roughness spread it across the
+      // housing without turning the entire environment into an amber flood.
+      const halo = 95 * Math.exp(-0.5 * (
+        (du / 0.0052) ** 2 + (dv / 0.0145) ** 2
+      ));
+      const softbox = 85 * Math.exp(-(
+        (Math.abs(du) / 0.003) ** 6 + (Math.abs(dv) / 0.0105) ** 6
+      ));
+      const filament = 120 * Math.exp(-0.5 * (
+        (du / 0.001) ** 2 + (dv / 0.0048) ** 2
+      ));
+      const facetA = 42 * Math.exp(-0.5 * (
+        ((du - 0.0024) / 0.0014) ** 2 + ((dv + 0.002) / 0.0072) ** 2
+      ));
+      const facetB = 36 * Math.exp(-0.5 * (
+        ((du + 0.0027) / 0.0015) ** 2 + ((dv - 0.0024) / 0.0066) ** 2
+      ));
+      const radiance = halo + softbox + filament + facetA + facetB;
+      signal[y * width + x] = radiance;
+      signalPeak = Math.max(signalPeak, radiance);
+    }
+  }
+
+  const {
+    data: studioData,
+    width: studioWidth,
+    height: studioHeight,
+  } = studioEnvironment.image;
+  const halfFloatStudio = studioEnvironment.type === THREE.HalfFloatType;
+  const readStudioChannel = (offset) => (
+    halfFloatStudio
+      ? THREE.DataUtils.fromHalfFloat(studioData[offset])
+      : studioData[offset]
+  );
+  const writeChannel = (offset, value) => {
+    data[offset] = halfFloatStudio
+      ? THREE.DataUtils.toHalfFloat(value)
+      : value;
+  };
+  let studioPeakLuminance = 0;
+  for (let offset = 0; offset < studioData.length; offset += 4) {
+    const red = readStudioChannel(offset);
+    const green = readStudioChannel(offset + 1);
+    const blue = readStudioChannel(offset + 2);
+    studioPeakLuminance = Math.max(
+      studioPeakLuminance,
+      red * 0.2126 + green * 0.7152 + blue * 0.0722,
+    );
+  }
+
+  const warmColor = new THREE.Color(1, 0.32, 0.035);
+  const warmLuminance = (
+    warmColor.r * 0.2126 + warmColor.g * 0.7152 + warmColor.b * 0.0722
+  );
+  const syntheticPeakLuminance = (
+    studioPeakLuminance * INDICATOR_REFLECTION_PEAK_MULTIPLIER
+  );
+  let combinedPeakLuminance = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    const studioY = Math.min(Math.floor((y + 0.5) * studioHeight / height), studioHeight - 1);
+    for (let x = 0; x < width; x += 1) {
+      const studioX = Math.min(Math.floor((x + 0.5) * studioWidth / width), studioWidth - 1);
+      const studioOffset = (studioY * studioWidth + studioX) * 4;
+      const syntheticLuminance = (
+        (signal[y * width + x] / signalPeak) * syntheticPeakLuminance
+      );
+      const syntheticRadiance = syntheticLuminance / warmLuminance;
+      const red = readStudioChannel(studioOffset) + syntheticRadiance * warmColor.r;
+      const green = readStudioChannel(studioOffset + 1) + syntheticRadiance * warmColor.g;
+      const blue = readStudioChannel(studioOffset + 2) + syntheticRadiance * warmColor.b;
+      const offset = (y * width + x) * 4;
+      writeChannel(offset, red);
+      writeChannel(offset + 1, green);
+      writeChannel(offset + 2, blue);
+      writeChannel(offset + 3, 1);
+      combinedPeakLuminance = Math.max(
+        combinedPeakLuminance,
+        red * 0.2126 + green * 0.7152 + blue * 0.0722,
+      );
+    }
+  }
+
+  const texture = new THREE.DataTexture(
+    data,
+    width,
+    height,
+    THREE.RGBAFormat,
+    studioEnvironment.type,
+  );
+  texture.name = 'indicator-lit-reflection-environment';
+  texture.mapping = THREE.EquirectangularReflectionMapping;
+  texture.colorSpace = THREE.LinearSRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.flipY = studioEnvironment.flipY;
+  texture.userData.studioPeakLuminance = studioPeakLuminance;
+  texture.userData.syntheticPeakLuminance = syntheticPeakLuminance;
+  texture.userData.combinedPeakLuminance = combinedPeakLuminance;
+  texture.userData.syntheticPeakMultiplier = INDICATOR_REFLECTION_PEAK_MULTIPLIER;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 async function loadModel() {
@@ -541,14 +694,19 @@ function setLoadingLabel(label) {
   loadingLabel.textContent = label;
 }
 
-function installCar(model, textures) {
+function installCar(model, textures, studioReflectionMap, indicatorReflectionMap) {
   car = model;
-  const wwcMaterials = createAdvancedMaterials(textures);
+  const wwcMaterials = createAdvancedMaterials(
+    textures,
+    studioReflectionMap,
+    indicatorReflectionMap,
+  );
   car.scale.setScalar(MODEL_META.modelScale ?? 1);
 
   const maxAnisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 12);
   const preparedMaterials = new Set();
   const tireMeshes = [];
+  const indicatorLensMeshes = [];
 
   car.traverse((object) => {
     if (!object.isMesh) return;
@@ -563,9 +721,7 @@ function installCar(model, textures) {
     }
     if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'glass-orange') {
       assignLampEndMaterial(object, wwcMaterials.get('glass-orange-ends'), true);
-    }
-    if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'glass-clear') {
-      assignLampEndMaterial(object, wwcMaterials.get('indicator-bulbs'));
+      indicatorLensMeshes.push(object);
     }
     const installedMaterials = Array.isArray(object.material) ? object.material : [object.material];
     const isOccluder = installedMaterials.some((material) => material.name === 'shadow-planes');
@@ -595,34 +751,28 @@ function installCar(model, textures) {
   bodyMaterial = wwcMaterials.get('carpaint') ?? null;
   bodyRoughnessMap = bodyMaterial?.roughnessMap ?? null;
   lampMaterials.headlights = wwcMaterials.get('glass-headlights') ?? null;
-  lampMaterials.indicatorBase = wwcMaterials.get('glass-orange') ?? null;
-  lampMaterials.indicatorEnds = wwcMaterials.get('glass-orange-ends') ?? null;
-  lampMaterials.indicatorBulbs = wwcMaterials.get('indicator-bulbs') ?? null;
-  lampMaterials.indicatorReflectors = wwcMaterials.get('indicator-reflectors') ?? null;
-  lampMaterials.sideIndicatorBulbs = wwcMaterials.get('indicator-bulbs-side') ?? null;
-  lampMaterials.sideIndicatorReflectors = wwcMaterials.get('indicator-reflectors-side') ?? null;
-  lampMaterials.tailCenter = wwcMaterials.get('glass-reflector') ?? null;
+  lampMaterials.indicatorReflectorsOff = wwcMaterials.get('glass-orange-ends') ?? null;
+  lampMaterials.indicatorReflectors = wwcMaterials.get('glass-orange-ends-lit') ?? null;
+  lampMaterials.indicatorHotspots = wwcMaterials.get('indicator-hotspots') ?? null;
+  lampMaterials.sideIndicatorHotspots = wwcMaterials.get('indicator-hotspots-side') ?? null;
   lampMaterials.tailBulbs = wwcMaterials.get('tail-lamp-bulbs') ?? null;
   lampMaterials.tailLampReflectors = wwcMaterials.get('tail-lamp-reflectors') ?? null;
-  lampMaterials.tailBrake = wwcMaterials.get('glass-red-1') ?? null;
-  lampMaterials.tailOuter = wwcMaterials.get('glass-red-2') ?? null;
-  lampMaterials.reverseLens = wwcMaterials.get('glass-tail-white') ?? null;
   lampMaterials.reverseBulbs = wwcMaterials.get('reverse-lamp-bulbs') ?? null;
   lampMaterials.reverseReflectors = wwcMaterials.get('reverse-lamp-reflectors') ?? null;
+  lampMeshes.indicatorLenses = indicatorLensMeshes;
   [
+    lampMaterials.indicatorReflectorsOff,
     lampMaterials.indicatorReflectors,
-    lampMaterials.sideIndicatorBulbs,
-    lampMaterials.sideIndicatorReflectors,
+    lampMaterials.indicatorHotspots,
+    lampMaterials.sideIndicatorHotspots,
     lampMaterials.tailBulbs,
     lampMaterials.tailLampReflectors,
     lampMaterials.reverseBulbs,
     lampMaterials.reverseReflectors,
   ].filter(Boolean).forEach((material) => prepareMaterial(material, maxAnisotropy));
   car.add(createIndicatorLampInternals(
-    lampMaterials.indicatorBulbs,
-    lampMaterials.indicatorReflectors,
-    lampMaterials.sideIndicatorBulbs,
-    lampMaterials.sideIndicatorReflectors,
+    lampMaterials.indicatorHotspots,
+    lampMaterials.sideIndicatorHotspots,
   ));
   car.add(createRearLampInternals(
     lampMaterials.tailBulbs,
@@ -651,58 +801,54 @@ function prepareMaterial(material, anisotropy) {
 }
 
 function createIndicatorLampInternals(
-  bulbMaterial,
-  reflectorMaterial,
-  sideBulbMaterial,
-  sideReflectorMaterial,
+  hotspotMaterial,
+  sideHotspotMaterial,
 ) {
   const group = new THREE.Group();
   group.name = 'indicator-lamp-internals';
-  if (!bulbMaterial || !reflectorMaterial || !sideBulbMaterial || !sideReflectorMaterial) {
+  if (
+    !hotspotMaterial
+    || !sideHotspotMaterial
+  ) {
     return group;
   }
 
-  // The source model already includes the front bulb spheres. Rear and side
-  // housings only contain lens shells, so add small emitters inside them.
-  const bulbGeometry = new THREE.SphereGeometry(1, 18, 12);
   const emitters = [
     // Positions are in the FBX root's Z-up coordinate system.
-    { position: [-0.744, 1.93, 0.584], radius: 0.027, material: bulbMaterial },
-    { position: [0.744, 1.93, 0.584], radius: 0.027, material: bulbMaterial },
-    { position: [-0.786, -0.754, 0.68], radius: 0.01, material: sideBulbMaterial },
-    { position: [0.786, -0.754, 0.68], radius: 0.01, material: sideBulbMaterial },
+    { position: [-0.574, -2.005, 0.366] },
+    { position: [0.574, -2.005, 0.366] },
+    { position: [-0.744, 1.99, 0.584] },
+    { position: [0.744, 1.99, 0.584] },
+    { position: [-0.786, -0.754, 0.68] },
+    { position: [0.786, -0.754, 0.68] },
   ];
 
-  emitters.forEach(({ position, radius, material }) => {
-    const bulb = new THREE.Mesh(bulbGeometry, material);
-    bulb.position.fromArray(position);
-    bulb.scale.setScalar(radius);
-    bulb.castShadow = false;
-    bulb.receiveShadow = false;
-    group.add(bulb);
-  });
-
-  const reflectorGeometry = new THREE.CircleGeometry(1, 32);
-  const reflectors = [
-    { position: [-0.509, -1.991, 0.367], scale: [0.045, 0.024], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
-    { position: [0.509, -1.991, 0.367], scale: [0.045, 0.024], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
-    { position: [-0.715, -1.908, 0.367], scale: [0.03, 0.019], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
-    { position: [0.715, -1.908, 0.367], scale: [0.03, 0.019], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
-    { position: [-0.744, 1.9, 0.584], scale: [0.06, 0.036], rotation: [-Math.PI / 2, 0, 0], material: reflectorMaterial },
-    { position: [0.744, 1.9, 0.584], scale: [0.06, 0.036], rotation: [-Math.PI / 2, 0, 0], material: reflectorMaterial },
-    { position: [-0.78, -0.754, 0.68], scale: [0.016, 0.025], rotation: [0, -Math.PI / 2, 0], material: sideReflectorMaterial },
-    { position: [0.78, -0.754, 0.68], scale: [0.016, 0.025], rotation: [0, Math.PI / 2, 0], material: sideReflectorMaterial },
+  // The Gaussian sources have fixed world-space dimensions, so their blur
+  // naturally occupies fewer screen pixels as the camera moves away. Oriented
+  // planes also prevent the opposite end of the car shining through a lens.
+  const hotspotGeometry = new THREE.PlaneGeometry(2, 2);
+  const hotspots = [
+    { position: emitters[0].position, scale: [0.036, 0.022], rotation: [Math.PI / 2, 0, 0], material: hotspotMaterial },
+    { position: emitters[1].position, scale: [0.036, 0.022], rotation: [Math.PI / 2, 0, 0], material: hotspotMaterial },
+    { position: emitters[2].position, scale: [0.034, 0.025], rotation: [-Math.PI / 2, 0, 0], material: hotspotMaterial },
+    { position: emitters[3].position, scale: [0.034, 0.025], rotation: [-Math.PI / 2, 0, 0], material: hotspotMaterial },
+    { position: emitters[4].position, scale: [0.012, 0.019], rotation: [0, -Math.PI / 2, 0], material: sideHotspotMaterial },
+    { position: emitters[5].position, scale: [0.012, 0.019], rotation: [0, Math.PI / 2, 0], material: sideHotspotMaterial },
   ];
-
-  reflectors.forEach(({ position, scale, rotation, material }) => {
-    const reflector = new THREE.Mesh(reflectorGeometry, material);
-    reflector.position.fromArray(position);
-    reflector.scale.set(scale[0], scale[1], 1);
-    reflector.rotation.set(...rotation);
-    reflector.castShadow = false;
-    reflector.receiveShadow = false;
-    group.add(reflector);
+  hotspots.forEach(({ position, scale, rotation, material }, index) => {
+    const hotspot = new THREE.Mesh(hotspotGeometry, material);
+    hotspot.name = `indicator-hotspot-${index}`;
+    hotspot.position.fromArray(position);
+    hotspot.scale.set(scale[0], scale[1], 1);
+    hotspot.rotation.set(...rotation);
+    hotspot.castShadow = false;
+    hotspot.receiveShadow = false;
+    hotspot.visible = false;
+    material.userData.lampMeshes ??= [];
+    material.userData.lampMeshes.push(hotspot);
+    group.add(hotspot);
   });
+
   return group;
 }
 
@@ -729,36 +875,47 @@ function createRearLampInternals(
   const reflectorGeometry = new THREE.PlaneGeometry(2, 2);
   const lamps = [
     {
-      x: -0.495,
+      x: -0.587,
       y: 2.055,
       bulb: tailBulbMaterial,
       reflector: tailReflectorMaterial,
-      scale: [0.052, 0.034],
+      scale: [0.03, 0.034],
+      bulbRadius: 0.0045,
     },
     {
-      x: 0.495,
+      x: 0.587,
       y: 2.055,
       bulb: tailBulbMaterial,
       reflector: tailReflectorMaterial,
-      scale: [0.052, 0.034],
+      scale: [0.03, 0.034],
+      bulbRadius: 0.0045,
     },
     {
-      x: -0.638,
+      x: -0.643,
       y: 2.035,
       bulb: reverseBulbMaterial,
       reflector: reverseReflectorMaterial,
-      scale: [0.027, 0.034],
+      scale: [0.018, 0.034],
+      bulbRadius: 0.0035,
     },
     {
-      x: 0.638,
+      x: 0.643,
       y: 2.035,
       bulb: reverseBulbMaterial,
       reflector: reverseReflectorMaterial,
-      scale: [0.027, 0.034],
+      scale: [0.018, 0.034],
+      bulbRadius: 0.0035,
     },
   ];
 
-  lamps.forEach(({ x, y, bulb: bulbMaterial, reflector: reflectorMaterial, scale }) => {
+  lamps.forEach(({
+    x,
+    y,
+    bulb: bulbMaterial,
+    reflector: reflectorMaterial,
+    scale,
+    bulbRadius,
+  }) => {
     const reflector = new THREE.Mesh(reflectorGeometry, reflectorMaterial);
     reflector.position.set(x, y, 0.584);
     reflector.scale.set(scale[0], scale[1], 1);
@@ -768,8 +925,8 @@ function createRearLampInternals(
     group.add(reflector);
 
     const bulb = new THREE.Mesh(bulbGeometry, bulbMaterial);
-    bulb.position.set(x, y + 0.018, 0.584);
-    bulb.scale.setScalar(Math.min(scale[0], scale[1]) * 0.34);
+    bulb.position.set(x, y + 0.009, 0.584);
+    bulb.scale.setScalar(bulbRadius);
     bulb.castShadow = false;
     bulb.receiveShadow = false;
     group.add(bulb);
@@ -877,29 +1034,51 @@ function assignLicensePlateMaterial(mesh, plateMaterial) {
   if (plateTriangles > 0) mesh.material = [mesh.material, plateMaterial];
 }
 
-function createIndicatorReflectorTexture() {
-  const reflectorCanvas = document.createElement('canvas');
-  reflectorCanvas.width = 128;
-  reflectorCanvas.height = 128;
-  const context = reflectorCanvas.getContext('2d');
-  const gradient = context.createRadialGradient(64, 64, 2, 64, 64, 64);
-  gradient.addColorStop(0, '#fff4ce');
-  gradient.addColorStop(0.12, '#ffb32d');
-  gradient.addColorStop(0.42, '#a63b04');
-  gradient.addColorStop(0.78, '#351304');
-  gradient.addColorStop(1, '#120703');
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 128, 128);
+function createIndicatorHotspotMaterial(name) {
+  return new THREE.ShaderMaterial({
+    name,
+    uniforms: {
+      lampColor: { value: new THREE.Color(0xff5a08) },
+      lampRadiance: { value: 0 },
+      lampOpacity: { value: 0 },
+    },
+    vertexShader: `
+      varying vec2 vHotspotPosition;
 
-  const texture = new THREE.CanvasTexture(reflectorCanvas);
-  texture.name = 'indicator-reflector-response';
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.minFilter = THREE.LinearMipmapLinearFilter;
-  texture.magFilter = THREE.LinearFilter;
-  return texture;
+      void main() {
+        vHotspotPosition = (uv - 0.5) * 2.0;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 lampColor;
+      uniform float lampRadiance;
+      uniform float lampOpacity;
+      varying vec2 vHotspotPosition;
+
+      void main() {
+        float radiusSquared = dot(vHotspotPosition, vHotspotPosition);
+        float radius = sqrt(radiusSquared);
+        float core = exp(-18.0 * radiusSquared);
+        float scattered = exp(-3.8 * radiusSquared);
+        float aperture = 1.0 - smoothstep(0.82, 1.0, radius);
+        float response = (0.72 * core + 0.28 * scattered) * aperture;
+        float alpha = response * lampOpacity;
+        if (alpha < 0.0005) discard;
+        gl_FragColor = vec4(lampColor * lampRadiance, alpha);
+      }
+    `,
+    // Composite the local optical hotspot without writing depth. The passive
+    // lens and HDR-reflective housing remain visible underneath every pixel.
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.FrontSide,
+  });
 }
 
-function createAdvancedMaterials(textures) {
+function createAdvancedMaterials(textures, studioReflectionMap, indicatorReflectionMap) {
   // Lamp maps retain the source asset's native KTX2 orientation and FBX UVs.
   const texture = (name) => {
     const result = textures.get(name);
@@ -995,7 +1174,7 @@ function createAdvancedMaterials(textures) {
     roughness: 0.25,
     transmission: 0.34,
     attenuationDistance: 0.1,
-    emissiveIntensity: 0.035,
+    emissiveIntensity: 0,
     envMapIntensity: 0.52,
     transmissionRoughness: 0.38,
   }));
@@ -1035,20 +1214,20 @@ function createAdvancedMaterials(textures) {
   }));
   const orangeLensMaterial = add(physical('glass-orange', {
     color: 0xd05005,
-    emissive: 0x281000,
-    emissiveIntensity: 0.06,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
     normalMap: texture('glass-orange_normal.jpg'),
     normalScale: normalScale(1.35),
     metalness: 0,
-    roughness: 0.13,
-    transmission: 0.3,
-    opacity: 0.92,
+    roughness: 0.16,
+    transmission: 0.55,
+    opacity: 0.72,
     transparent: true,
     depthWrite: false,
     ior: 1.48,
     thickness: 0.024,
     attenuationColor: 0xff7218,
-    attenuationDistance: 0.075,
+    attenuationDistance: 0.18,
     clearcoat: 1,
     clearcoatRoughness: 0.035,
     envMapIntensity: 1.3,
@@ -1056,42 +1235,34 @@ function createAdvancedMaterials(textures) {
   }));
   const endOrangeLensMaterial = orangeLensMaterial.clone();
   endOrangeLensMaterial.name = 'glass-orange-ends';
-  // The authored inner face carries the useful fluted response. Treat it as the
-  // frosted cover so the close reflector cannot composite sharply through it.
-  add(finishFrostedLensShell(endOrangeLensMaterial, {
-    attenuationDistance: 0.12,
-    emissiveIntensity: 0.02,
-  }));
-  const indicatorBulbMaterial = add(standard('indicator-bulbs', {
-    color: 0x2d1608,
-    emissive: 0x000000,
+  // The authored inner face is the reflective lamp housing. Keep two
+  // precompiled variants so blinking swaps only its reflection environment;
+  // neither material emits any light.
+  const indicatorReflectorOffMaterial = add(finishFrostedLensShell(endOrangeLensMaterial, {
+    transmission: 0.62,
+    attenuationDistance: 0.18,
     emissiveIntensity: 0,
-    metalness: 0,
-    roughness: 0.42,
-    envMapIntensity: 0.18,
+    envMapIntensity: scene.environmentIntensity,
+    transmissionRoughness: 0.46,
   }));
-  const sideIndicatorBulbMaterial = indicatorBulbMaterial.clone();
-  sideIndicatorBulbMaterial.name = 'indicator-bulbs-side';
-  add(sideIndicatorBulbMaterial);
-  const indicatorReflectorTexture = createIndicatorReflectorTexture();
-  const indicatorReflectorMaterial = add(standard('indicator-reflectors', {
-    color: 0x5b2607,
-    map: indicatorReflectorTexture,
-    emissive: 0x000000,
-    emissiveMap: indicatorReflectorTexture,
-    emissiveIntensity: 0,
-    metalness: 0.58,
-    roughness: 0.24,
-    envMapIntensity: 0.45,
-    side: THREE.DoubleSide,
-  }));
-  const sideIndicatorReflectorMaterial = indicatorReflectorMaterial.clone();
-  sideIndicatorReflectorMaterial.name = 'indicator-reflectors-side';
-  add(sideIndicatorReflectorMaterial);
+  indicatorReflectorOffMaterial.envMap = studioReflectionMap;
+  const indicatorReflectorMaterial = indicatorReflectorOffMaterial.clone();
+  indicatorReflectorMaterial.name = 'glass-orange-ends-lit';
+  indicatorReflectorMaterial.envMap = indicatorReflectionMap;
+  indicatorReflectorMaterial.envMapIntensity = 0.7;
+  indicatorReflectorMaterial.normalScale.setScalar(0.9);
+  indicatorReflectorMaterial.roughness = 0.14;
+  add(indicatorReflectorMaterial);
+  const indicatorHotspotMaterial = add(
+    createIndicatorHotspotMaterial('indicator-hotspots'),
+  );
+  const sideIndicatorHotspotMaterial = indicatorHotspotMaterial.clone();
+  sideIndicatorHotspotMaterial.name = 'indicator-hotspots-side';
+  add(sideIndicatorHotspotMaterial);
   add(finishFrostedLensShell(physical('glass-red-1', {
     color: 0x8a0309,
-    emissive: 0x180002,
-    emissiveIntensity: 0.06,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
     normalMap: texture('glass-red_normal.jpg'),
     normalScale: normalScale(1.45),
     metalness: 0,
@@ -1113,7 +1284,7 @@ function createAdvancedMaterials(textures) {
     roughness: 0.25,
     transmission: 0.38,
     attenuationDistance: 0.1,
-    emissiveIntensity: 0.035,
+    emissiveIntensity: 0,
     envMapIntensity: 0.52,
     transmissionRoughness: 0.38,
   }));
@@ -1175,8 +1346,8 @@ function createAdvancedMaterials(textures) {
   }));
   add(finishFrostedLensShell(physical('glass-red-2', {
     color: 0x710207,
-    emissive: 0x120001,
-    emissiveIntensity: 0.06,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
     normalMap: texture('glass-orange_normal.jpg'),
     normalScale: normalScale(1),
     metalness: 0,
@@ -1198,7 +1369,7 @@ function createAdvancedMaterials(textures) {
     roughness: 0.25,
     transmission: 0.36,
     attenuationDistance: 0.1,
-    emissiveIntensity: 0.035,
+    emissiveIntensity: 0,
     envMapIntensity: 0.52,
     transmissionRoughness: 0.38,
   }));
@@ -1692,6 +1863,8 @@ function updateRange(input) {
 function setStudioRotation(degrees) {
   const radians = THREE.MathUtils.degToRad(degrees);
   scene.environmentRotation.y = radians;
+  lampMaterials.indicatorReflectorsOff?.envMapRotation.set(0, radians, 0);
+  lampMaterials.indicatorReflectors?.envMapRotation.set(0, radians, 0);
   lights.studioRig.rotation.y = radians;
   lights.studioRig.updateMatrixWorld(true);
   renderer.shadowMap.needsUpdate = true;
@@ -1709,7 +1882,7 @@ function setHeadlights(enabled) {
 
 function setIndicators(enabled) {
   vehicleLightState.indicators = enabled;
-  vehicleLightState.indicatorElapsed = 0;
+  vehicleLightState.indicatorStartedAt = performance.now() * 0.001;
   applyIndicatorIllumination(enabled);
 }
 
@@ -1729,38 +1902,60 @@ function setMaterialEmission(material, color, intensity) {
   material.emissiveIntensity = intensity;
 }
 
+function setIndicatorHousingReflection(lit) {
+  const offMaterial = lampMaterials.indicatorReflectorsOff;
+  const onMaterial = lampMaterials.indicatorReflectors;
+  const activeMaterial = lit ? onMaterial : offMaterial;
+  if (!offMaterial || !onMaterial || !activeMaterial) return;
+
+  lampMeshes.indicatorLenses.forEach((mesh) => {
+    const installedMaterials = Array.isArray(mesh.material)
+      ? mesh.material
+      : [mesh.material];
+    installedMaterials.forEach((material, index) => {
+      if (material !== offMaterial && material !== onMaterial) return;
+      installedMaterials[index] = activeMaterial;
+    });
+    mesh.material = Array.isArray(mesh.material)
+      ? installedMaterials
+      : installedMaterials[0];
+  });
+}
+
+function setIndicatorHotspotRadiance(lit) {
+  const setHotspot = (material, radiance, opacity) => {
+    if (!material) return;
+    material.uniforms.lampColor.value.setHex(0xff5a08);
+    material.uniforms.lampRadiance.value = lit ? radiance : 0;
+    material.uniforms.lampOpacity.value = lit ? opacity : 0;
+    material.userData.lampMeshes?.forEach((mesh) => {
+      mesh.visible = lit;
+    });
+  };
+  setHotspot(lampMaterials.indicatorHotspots, 8, 0.84);
+  setHotspot(lampMaterials.sideIndicatorHotspots, 2.8, 0.72);
+}
+
 function applyIndicatorIllumination(lit) {
   vehicleLightState.indicatorLit = vehicleLightState.indicators && lit;
-  // Keep the amber lens passive; the bulb behind it is the animated emitter.
-  setMaterialEmission(lampMaterials.indicatorBase, 0x281000, 0.06);
-  setMaterialEmission(lampMaterials.indicatorEnds, 0x281000, 0.02);
-
-  if (vehicleLightState.indicatorLit) {
-    lampMaterials.indicatorBulbs?.color.setHex(0xff7a16);
-    lampMaterials.sideIndicatorBulbs?.color.setHex(0xff7a16);
-    setMaterialEmission(lampMaterials.indicatorBulbs, 0xff5208, 24);
-    setMaterialEmission(lampMaterials.indicatorReflectors, 0xff4a04, 10);
-    setMaterialEmission(lampMaterials.sideIndicatorBulbs, 0xff5208, 32);
-    setMaterialEmission(lampMaterials.sideIndicatorReflectors, 0xff4a04, 16);
-    return;
-  }
-
-  lampMaterials.indicatorBulbs?.color.setHex(0x2d1608);
-  lampMaterials.sideIndicatorBulbs?.color.setHex(0x2d1608);
-  setMaterialEmission(lampMaterials.indicatorBulbs, 0x000000, 0);
-  setMaterialEmission(lampMaterials.indicatorReflectors, 0x000000, 0);
-  setMaterialEmission(lampMaterials.sideIndicatorBulbs, 0x000000, 0);
-  setMaterialEmission(lampMaterials.sideIndicatorReflectors, 0x000000, 0);
+  setIndicatorHousingReflection(
+    vehicleLightState.indicatorLit && indicatorRenderComponents.reflections,
+  );
+  setIndicatorHotspotRadiance(
+    vehicleLightState.indicatorLit && indicatorRenderComponents.hotspots,
+  );
 }
 
 function applyRearLampState() {
   const running = vehicleLightState.headlights;
-  const tailBulbIntensity = vehicleLightState.brakes ? 80 : running ? 22 : 0;
-  const tailReflectorIntensity = vehicleLightState.brakes ? 40 : running ? 14 : 0;
-
-  // The center bar and cover shells stay passive. Bulbs and their reflector
-  // housings illuminate behind the two outer red lamp chambers.
-  setMaterialEmission(lampMaterials.tailCenter, 0x000000, 0);
+  const tailBulbIntensity = vehicleLightState.brakes
+    ? ACTIVE_LAMP_RADIANCE_SCALE
+    : running ? 0.5 : 0;
+  const tailReflectorIntensity = vehicleLightState.brakes
+    ? 3 * ACTIVE_LAMP_RADIANCE_SCALE
+    : running ? 2 : 0;
+  // Every cover shell stays passive. Bulbs and reflector housings provide all
+  // lamp radiance from behind the authored lenses.
   setMaterialEmission(
     lampMaterials.tailBulbs,
     tailBulbIntensity > 0 ? 0xff1204 : 0x000000,
@@ -1771,27 +1966,22 @@ function applyRearLampState() {
     tailReflectorIntensity > 0 ? 0xff0000 : 0x000000,
     tailReflectorIntensity,
   );
-  setMaterialEmission(lampMaterials.tailBrake, 0x000000, 0);
-  setMaterialEmission(lampMaterials.tailOuter, 0x000000, 0);
-  setMaterialEmission(lampMaterials.reverseLens, 0x000000, 0);
   setMaterialEmission(
     lampMaterials.reverseBulbs,
     vehicleLightState.reverse ? 0xfff1d2 : 0x000000,
-    vehicleLightState.reverse ? 18 : 0,
+    vehicleLightState.reverse ? 0.5 * ACTIVE_LAMP_RADIANCE_SCALE : 0,
   );
   setMaterialEmission(
     lampMaterials.reverseReflectors,
     vehicleLightState.reverse ? 0xfff4dc : 0x000000,
-    vehicleLightState.reverse ? 5 : 0,
+    vehicleLightState.reverse ? 1.5 * ACTIVE_LAMP_RADIANCE_SCALE : 0,
   );
 }
 
-function updateIndicators(delta) {
+function updateIndicators(timestamp) {
   if (!vehicleLightState.indicators) return;
-  vehicleLightState.indicatorElapsed = (
-    vehicleLightState.indicatorElapsed + delta
-  ) % INDICATOR_PERIOD;
-  const lit = vehicleLightState.indicatorElapsed < INDICATOR_ON_TIME;
+  const elapsed = (timestamp - vehicleLightState.indicatorStartedAt) % INDICATOR_PERIOD;
+  const lit = elapsed < INDICATOR_ON_TIME;
   if (lit !== vehicleLightState.indicatorLit) applyIndicatorIllumination(lit);
 }
 
@@ -1989,11 +2179,11 @@ function resize() {
   }
 }
 
-function render() {
+function render(timestamp) {
   const delta = Math.min(clock.getDelta(), 0.05);
   updateCameraTween(delta);
   controls.update(delta);
-  updateIndicators(delta);
+  updateIndicators(timestamp * 0.001);
   updateHeadlightEmission();
   composer.render(delta);
   adaptQuality(delta);

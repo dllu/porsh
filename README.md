@@ -16,6 +16,13 @@ npm run dev
 
 Open the URL shown by Vite. Production output can be generated with `npm run build` and served with `npm run preview`.
 
+For lighting and material iteration, run `npm run test:render`. It launches a
+UI-free, deterministic browser harness and writes clean comparison frames for
+the front, rear, and side lamps under `render-tests/`. Set
+`P959_RENDER_OUTPUT=/absolute/path` to write them elsewhere, or use a
+comma-separated `P959_RENDER_STATES` list to render only named frames shown in
+`scripts/render-test.mjs`.
+
 The setup command keeps the plaintext FBX, source textures, and local license under the Git-ignored `local-models/wwc-advanced/` directory. It prepares 54 GPU-compressed KTX2/UASTC maps with mipmaps, bundles them with the FBX, and authenticates/encrypts the bundle with AES-256-GCM. Only a content-addressed `.p9e` payload is written beneath the Git-ignored `public/models/protected/` directory.
 
 The first setup is CPU-intensive because it encodes the full texture set. Later runs reuse the prepared maps. Use `npm run setup:model -- /path/to/archive.zip --rebuild-textures` only when you intentionally want to regenerate every KTX2 map.
