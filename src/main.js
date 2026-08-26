@@ -109,6 +109,8 @@ const gtaoPass = new GTAOPass(
 gtaoPass.output = GTAOPass.OUTPUT.Default;
 gtaoPass.blendIntensity = 0.66;
 
+// Bloom is a fixed camera response. Lamp switches change radiance at the
+// emitters only, so unrelated studio reflections never pulse with a light.
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
   0.018,
@@ -126,6 +128,12 @@ composer.addPass(outputPass);
 
 const progress = { model: 0, environment: 0 };
 const clock = new THREE.Clock();
+const INDICATOR_PERIOD = 0.72;
+const INDICATOR_ON_TIME = 0.36;
+const headlightCenter = new THREE.Vector3(0, 0.68, 1.88);
+const headlightTarget = new THREE.Vector3(0, 0.25, 9);
+const headlightViewDirection = new THREE.Vector3();
+const headlightBeamDirection = new THREE.Vector3();
 const cameraPresets = {
   hero: {
     label: 'HERO',
@@ -215,7 +223,31 @@ const paintProfiles = {
 let car = null;
 let bodyMaterial = null;
 let bodyRoughnessMap = null;
-let headlightMaterial = null;
+const lampMaterials = {
+  headlights: null,
+  indicatorBase: null,
+  indicatorEnds: null,
+  indicatorBulbs: null,
+  indicatorReflectors: null,
+  sideIndicatorBulbs: null,
+  sideIndicatorReflectors: null,
+  tailCenter: null,
+  tailBulbs: null,
+  tailLampReflectors: null,
+  tailBrake: null,
+  tailOuter: null,
+  reverseLens: null,
+  reverseBulbs: null,
+  reverseReflectors: null,
+};
+const vehicleLightState = {
+  headlights: false,
+  indicators: false,
+  brakes: false,
+  reverse: false,
+  indicatorElapsed: 0,
+  indicatorLit: false,
+};
 let cameraTween = null;
 let activeView = 'hero';
 let currentQuality = 'auto';
@@ -251,6 +283,9 @@ if (import.meta.env.DEV) {
       camera.fov = fov;
       camera.updateProjectionMatrix();
       controls.update();
+    },
+    getLightState() {
+      return { ...vehicleLightState };
     },
   };
 }
@@ -532,7 +567,6 @@ function installCar(model, textures) {
     if (resolvedMaterials.length === 1 && resolvedMaterials[0].name === 'glass-clear') {
       assignLampEndMaterial(object, wwcMaterials.get('indicator-bulbs'));
     }
-
     const installedMaterials = Array.isArray(object.material) ? object.material : [object.material];
     const isOccluder = installedMaterials.some((material) => material.name === 'shadow-planes');
     object.castShadow = !isOccluder && installedMaterials.every((material) => (
@@ -560,9 +594,47 @@ function installCar(model, textures) {
 
   bodyMaterial = wwcMaterials.get('carpaint') ?? null;
   bodyRoughnessMap = bodyMaterial?.roughnessMap ?? null;
-  headlightMaterial = wwcMaterials.get('glass-headlights') ?? null;
+  lampMaterials.headlights = wwcMaterials.get('glass-headlights') ?? null;
+  lampMaterials.indicatorBase = wwcMaterials.get('glass-orange') ?? null;
+  lampMaterials.indicatorEnds = wwcMaterials.get('glass-orange-ends') ?? null;
+  lampMaterials.indicatorBulbs = wwcMaterials.get('indicator-bulbs') ?? null;
+  lampMaterials.indicatorReflectors = wwcMaterials.get('indicator-reflectors') ?? null;
+  lampMaterials.sideIndicatorBulbs = wwcMaterials.get('indicator-bulbs-side') ?? null;
+  lampMaterials.sideIndicatorReflectors = wwcMaterials.get('indicator-reflectors-side') ?? null;
+  lampMaterials.tailCenter = wwcMaterials.get('glass-reflector') ?? null;
+  lampMaterials.tailBulbs = wwcMaterials.get('tail-lamp-bulbs') ?? null;
+  lampMaterials.tailLampReflectors = wwcMaterials.get('tail-lamp-reflectors') ?? null;
+  lampMaterials.tailBrake = wwcMaterials.get('glass-red-1') ?? null;
+  lampMaterials.tailOuter = wwcMaterials.get('glass-red-2') ?? null;
+  lampMaterials.reverseLens = wwcMaterials.get('glass-tail-white') ?? null;
+  lampMaterials.reverseBulbs = wwcMaterials.get('reverse-lamp-bulbs') ?? null;
+  lampMaterials.reverseReflectors = wwcMaterials.get('reverse-lamp-reflectors') ?? null;
+  [
+    lampMaterials.indicatorReflectors,
+    lampMaterials.sideIndicatorBulbs,
+    lampMaterials.sideIndicatorReflectors,
+    lampMaterials.tailBulbs,
+    lampMaterials.tailLampReflectors,
+    lampMaterials.reverseBulbs,
+    lampMaterials.reverseReflectors,
+  ].filter(Boolean).forEach((material) => prepareMaterial(material, maxAnisotropy));
+  car.add(createIndicatorLampInternals(
+    lampMaterials.indicatorBulbs,
+    lampMaterials.indicatorReflectors,
+    lampMaterials.sideIndicatorBulbs,
+    lampMaterials.sideIndicatorReflectors,
+  ));
+  car.add(createRearLampInternals(
+    lampMaterials.tailBulbs,
+    lampMaterials.tailLampReflectors,
+    lampMaterials.reverseBulbs,
+    lampMaterials.reverseReflectors,
+  ));
 
   scene.add(car);
+  applyIndicatorIllumination(vehicleLightState.indicatorLit);
+  applyRearLampState();
+  updateHeadlightEmission();
   gtaoPass.setSceneClipBox(new THREE.Box3(
     new THREE.Vector3(-3.6, -0.15, -3.6),
     new THREE.Vector3(3.6, 2.2, 3.6),
@@ -576,6 +648,134 @@ function prepareMaterial(material, anisotropy) {
     value.needsUpdate = true;
   }
   material.needsUpdate = true;
+}
+
+function createIndicatorLampInternals(
+  bulbMaterial,
+  reflectorMaterial,
+  sideBulbMaterial,
+  sideReflectorMaterial,
+) {
+  const group = new THREE.Group();
+  group.name = 'indicator-lamp-internals';
+  if (!bulbMaterial || !reflectorMaterial || !sideBulbMaterial || !sideReflectorMaterial) {
+    return group;
+  }
+
+  // The source model already includes the front bulb spheres. Rear and side
+  // housings only contain lens shells, so add small emitters inside them.
+  const bulbGeometry = new THREE.SphereGeometry(1, 18, 12);
+  const emitters = [
+    // Positions are in the FBX root's Z-up coordinate system.
+    { position: [-0.744, 1.93, 0.584], radius: 0.027, material: bulbMaterial },
+    { position: [0.744, 1.93, 0.584], radius: 0.027, material: bulbMaterial },
+    { position: [-0.786, -0.754, 0.68], radius: 0.01, material: sideBulbMaterial },
+    { position: [0.786, -0.754, 0.68], radius: 0.01, material: sideBulbMaterial },
+  ];
+
+  emitters.forEach(({ position, radius, material }) => {
+    const bulb = new THREE.Mesh(bulbGeometry, material);
+    bulb.position.fromArray(position);
+    bulb.scale.setScalar(radius);
+    bulb.castShadow = false;
+    bulb.receiveShadow = false;
+    group.add(bulb);
+  });
+
+  const reflectorGeometry = new THREE.CircleGeometry(1, 32);
+  const reflectors = [
+    { position: [-0.509, -1.991, 0.367], scale: [0.045, 0.024], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
+    { position: [0.509, -1.991, 0.367], scale: [0.045, 0.024], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
+    { position: [-0.715, -1.908, 0.367], scale: [0.03, 0.019], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
+    { position: [0.715, -1.908, 0.367], scale: [0.03, 0.019], rotation: [Math.PI / 2, 0, 0], material: reflectorMaterial },
+    { position: [-0.744, 1.9, 0.584], scale: [0.06, 0.036], rotation: [-Math.PI / 2, 0, 0], material: reflectorMaterial },
+    { position: [0.744, 1.9, 0.584], scale: [0.06, 0.036], rotation: [-Math.PI / 2, 0, 0], material: reflectorMaterial },
+    { position: [-0.78, -0.754, 0.68], scale: [0.016, 0.025], rotation: [0, -Math.PI / 2, 0], material: sideReflectorMaterial },
+    { position: [0.78, -0.754, 0.68], scale: [0.016, 0.025], rotation: [0, Math.PI / 2, 0], material: sideReflectorMaterial },
+  ];
+
+  reflectors.forEach(({ position, scale, rotation, material }) => {
+    const reflector = new THREE.Mesh(reflectorGeometry, material);
+    reflector.position.fromArray(position);
+    reflector.scale.set(scale[0], scale[1], 1);
+    reflector.rotation.set(...rotation);
+    reflector.castShadow = false;
+    reflector.receiveShadow = false;
+    group.add(reflector);
+  });
+  return group;
+}
+
+function createRearLampInternals(
+  tailBulbMaterial,
+  tailReflectorMaterial,
+  reverseBulbMaterial,
+  reverseReflectorMaterial,
+) {
+  const group = new THREE.Group();
+  group.name = 'rear-lamp-internals';
+  if (
+    !tailBulbMaterial
+    || !tailReflectorMaterial
+    || !reverseBulbMaterial
+    || !reverseReflectorMaterial
+  ) {
+    return group;
+  }
+
+  // These sit behind the untouched source lens shells. The transmissive lens
+  // and its native normal map provide the optical relief and soften the bulb.
+  const bulbGeometry = new THREE.SphereGeometry(1, 18, 12);
+  const reflectorGeometry = new THREE.PlaneGeometry(2, 2);
+  const lamps = [
+    {
+      x: -0.495,
+      y: 2.055,
+      bulb: tailBulbMaterial,
+      reflector: tailReflectorMaterial,
+      scale: [0.052, 0.034],
+    },
+    {
+      x: 0.495,
+      y: 2.055,
+      bulb: tailBulbMaterial,
+      reflector: tailReflectorMaterial,
+      scale: [0.052, 0.034],
+    },
+    {
+      x: -0.638,
+      y: 2.035,
+      bulb: reverseBulbMaterial,
+      reflector: reverseReflectorMaterial,
+      scale: [0.027, 0.034],
+    },
+    {
+      x: 0.638,
+      y: 2.035,
+      bulb: reverseBulbMaterial,
+      reflector: reverseReflectorMaterial,
+      scale: [0.027, 0.034],
+    },
+  ];
+
+  lamps.forEach(({ x, y, bulb: bulbMaterial, reflector: reflectorMaterial, scale }) => {
+    const reflector = new THREE.Mesh(reflectorGeometry, reflectorMaterial);
+    reflector.position.set(x, y, 0.584);
+    reflector.scale.set(scale[0], scale[1], 1);
+    reflector.rotation.x = -Math.PI / 2;
+    reflector.castShadow = false;
+    reflector.receiveShadow = false;
+    group.add(reflector);
+
+    const bulb = new THREE.Mesh(bulbGeometry, bulbMaterial);
+    bulb.position.set(x, y + 0.018, 0.584);
+    bulb.scale.setScalar(Math.min(scale[0], scale[1]) * 0.34);
+    bulb.castShadow = false;
+    bulb.receiveShadow = false;
+    group.add(bulb);
+  });
+
+  return group;
 }
 
 function assignLampEndMaterial(mesh, endMaterial, includeRear = false) {
@@ -675,6 +875,28 @@ function assignLicensePlateMaterial(mesh, plateMaterial) {
   geometry.addGroup(groupStart, triangleCount - groupStart, activeMaterial);
 
   if (plateTriangles > 0) mesh.material = [mesh.material, plateMaterial];
+}
+
+function createIndicatorReflectorTexture() {
+  const reflectorCanvas = document.createElement('canvas');
+  reflectorCanvas.width = 128;
+  reflectorCanvas.height = 128;
+  const context = reflectorCanvas.getContext('2d');
+  const gradient = context.createRadialGradient(64, 64, 2, 64, 64, 64);
+  gradient.addColorStop(0, '#fff4ce');
+  gradient.addColorStop(0.12, '#ffb32d');
+  gradient.addColorStop(0.42, '#a63b04');
+  gradient.addColorStop(0.78, '#351304');
+  gradient.addColorStop(1, '#120703');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 128, 128);
+
+  const texture = new THREE.CanvasTexture(reflectorCanvas);
+  texture.name = 'indicator-reflector-response';
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
 }
 
 function createAdvancedMaterials(textures) {
@@ -777,6 +999,40 @@ function createAdvancedMaterials(textures) {
     envMapIntensity: 0.52,
     transmissionRoughness: 0.38,
   }));
+  add(standard('tail-lamp-bulbs', {
+    color: 0x260000,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
+    metalness: 0,
+    roughness: 0.38,
+    envMapIntensity: 0.15,
+  }));
+  add(standard('tail-lamp-reflectors', {
+    color: 0x290003,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
+    metalness: 0.82,
+    roughness: 0.2,
+    envMapIntensity: 1.1,
+    side: THREE.DoubleSide,
+  }));
+  add(standard('reverse-lamp-bulbs', {
+    color: 0x282722,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
+    metalness: 0,
+    roughness: 0.36,
+    envMapIntensity: 0.15,
+  }));
+  add(standard('reverse-lamp-reflectors', {
+    color: 0xbab7ae,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
+    metalness: 0.88,
+    roughness: 0.17,
+    envMapIntensity: 1.35,
+    side: THREE.DoubleSide,
+  }));
   const orangeLensMaterial = add(physical('glass-orange', {
     color: 0xd05005,
     emissive: 0x281000,
@@ -806,14 +1062,32 @@ function createAdvancedMaterials(textures) {
     attenuationDistance: 0.12,
     emissiveIntensity: 0.02,
   }));
-  add(standard('indicator-bulbs', {
-    color: 0xffc28a,
-    emissive: 0xff6514,
-    emissiveIntensity: 0.3,
+  const indicatorBulbMaterial = add(standard('indicator-bulbs', {
+    color: 0x2d1608,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
     metalness: 0,
     roughness: 0.42,
-    envMapIntensity: 0.45,
+    envMapIntensity: 0.18,
   }));
+  const sideIndicatorBulbMaterial = indicatorBulbMaterial.clone();
+  sideIndicatorBulbMaterial.name = 'indicator-bulbs-side';
+  add(sideIndicatorBulbMaterial);
+  const indicatorReflectorTexture = createIndicatorReflectorTexture();
+  const indicatorReflectorMaterial = add(standard('indicator-reflectors', {
+    color: 0x5b2607,
+    map: indicatorReflectorTexture,
+    emissive: 0x000000,
+    emissiveMap: indicatorReflectorTexture,
+    emissiveIntensity: 0,
+    metalness: 0.58,
+    roughness: 0.24,
+    envMapIntensity: 0.45,
+    side: THREE.DoubleSide,
+  }));
+  const sideIndicatorReflectorMaterial = indicatorReflectorMaterial.clone();
+  sideIndicatorReflectorMaterial.name = 'indicator-reflectors-side';
+  add(sideIndicatorReflectorMaterial);
   add(finishFrostedLensShell(physical('glass-red-1', {
     color: 0x8a0309,
     emissive: 0x180002,
@@ -1323,6 +1597,15 @@ function setupInterface() {
   document.querySelector('#headlights-toggle').addEventListener('change', (event) => {
     setHeadlights(event.target.checked);
   });
+  document.querySelector('#indicators-toggle').addEventListener('change', (event) => {
+    setIndicators(event.target.checked);
+  });
+  document.querySelector('#brakes-toggle').addEventListener('change', (event) => {
+    setBrakeLights(event.target.checked);
+  });
+  document.querySelector('#reverse-toggle').addEventListener('change', (event) => {
+    setReverseLights(event.target.checked);
+  });
 
   document.querySelectorAll('[data-quality]').forEach((button) => {
     button.addEventListener('click', () => configureQuality(button.dataset.quality));
@@ -1357,6 +1640,21 @@ function setupInterface() {
       const toggle = document.querySelector('#headlights-toggle');
       toggle.checked = !toggle.checked;
       setHeadlights(toggle.checked);
+    }
+    if (event.code === 'KeyI') {
+      const toggle = document.querySelector('#indicators-toggle');
+      toggle.checked = !toggle.checked;
+      setIndicators(toggle.checked);
+    }
+    if (event.code === 'KeyB') {
+      const toggle = document.querySelector('#brakes-toggle');
+      toggle.checked = !toggle.checked;
+      setBrakeLights(toggle.checked);
+    }
+    if (event.code === 'KeyR') {
+      const toggle = document.querySelector('#reverse-toggle');
+      toggle.checked = !toggle.checked;
+      setReverseLights(toggle.checked);
     }
     if (event.code === 'KeyF') toggleFullscreen();
     if (event.code === 'Escape') {
@@ -1400,17 +1698,119 @@ function setStudioRotation(degrees) {
 }
 
 function setHeadlights(enabled) {
+  vehicleLightState.headlights = enabled;
   lights.headlightSpots.forEach((spot) => {
     spot.intensity = enabled ? 190 : 0;
   });
 
-  if (headlightMaterial) {
-    headlightMaterial.emissive.set(enabled ? 0xffe4b5 : 0x000000);
-    headlightMaterial.emissiveIntensity = enabled ? 1.35 : 0;
-    if (!headlightMaterial.emissiveMap && headlightMaterial.map) {
-      headlightMaterial.emissiveMap = headlightMaterial.map;
-    }
-    headlightMaterial.needsUpdate = true;
+  applyRearLampState();
+  updateHeadlightEmission();
+}
+
+function setIndicators(enabled) {
+  vehicleLightState.indicators = enabled;
+  vehicleLightState.indicatorElapsed = 0;
+  applyIndicatorIllumination(enabled);
+}
+
+function setBrakeLights(enabled) {
+  vehicleLightState.brakes = enabled;
+  applyRearLampState();
+}
+
+function setReverseLights(enabled) {
+  vehicleLightState.reverse = enabled;
+  applyRearLampState();
+}
+
+function setMaterialEmission(material, color, intensity) {
+  if (!material) return;
+  material.emissive.setHex(color);
+  material.emissiveIntensity = intensity;
+}
+
+function applyIndicatorIllumination(lit) {
+  vehicleLightState.indicatorLit = vehicleLightState.indicators && lit;
+  // Keep the amber lens passive; the bulb behind it is the animated emitter.
+  setMaterialEmission(lampMaterials.indicatorBase, 0x281000, 0.06);
+  setMaterialEmission(lampMaterials.indicatorEnds, 0x281000, 0.02);
+
+  if (vehicleLightState.indicatorLit) {
+    lampMaterials.indicatorBulbs?.color.setHex(0xff7a16);
+    lampMaterials.sideIndicatorBulbs?.color.setHex(0xff7a16);
+    setMaterialEmission(lampMaterials.indicatorBulbs, 0xff5208, 24);
+    setMaterialEmission(lampMaterials.indicatorReflectors, 0xff4a04, 10);
+    setMaterialEmission(lampMaterials.sideIndicatorBulbs, 0xff5208, 32);
+    setMaterialEmission(lampMaterials.sideIndicatorReflectors, 0xff4a04, 16);
+    return;
+  }
+
+  lampMaterials.indicatorBulbs?.color.setHex(0x2d1608);
+  lampMaterials.sideIndicatorBulbs?.color.setHex(0x2d1608);
+  setMaterialEmission(lampMaterials.indicatorBulbs, 0x000000, 0);
+  setMaterialEmission(lampMaterials.indicatorReflectors, 0x000000, 0);
+  setMaterialEmission(lampMaterials.sideIndicatorBulbs, 0x000000, 0);
+  setMaterialEmission(lampMaterials.sideIndicatorReflectors, 0x000000, 0);
+}
+
+function applyRearLampState() {
+  const running = vehicleLightState.headlights;
+  const tailBulbIntensity = vehicleLightState.brakes ? 80 : running ? 22 : 0;
+  const tailReflectorIntensity = vehicleLightState.brakes ? 40 : running ? 14 : 0;
+
+  // The center bar and cover shells stay passive. Bulbs and their reflector
+  // housings illuminate behind the two outer red lamp chambers.
+  setMaterialEmission(lampMaterials.tailCenter, 0x000000, 0);
+  setMaterialEmission(
+    lampMaterials.tailBulbs,
+    tailBulbIntensity > 0 ? 0xff1204 : 0x000000,
+    tailBulbIntensity,
+  );
+  setMaterialEmission(
+    lampMaterials.tailLampReflectors,
+    tailReflectorIntensity > 0 ? 0xff0000 : 0x000000,
+    tailReflectorIntensity,
+  );
+  setMaterialEmission(lampMaterials.tailBrake, 0x000000, 0);
+  setMaterialEmission(lampMaterials.tailOuter, 0x000000, 0);
+  setMaterialEmission(lampMaterials.reverseLens, 0x000000, 0);
+  setMaterialEmission(
+    lampMaterials.reverseBulbs,
+    vehicleLightState.reverse ? 0xfff1d2 : 0x000000,
+    vehicleLightState.reverse ? 18 : 0,
+  );
+  setMaterialEmission(
+    lampMaterials.reverseReflectors,
+    vehicleLightState.reverse ? 0xfff4dc : 0x000000,
+    vehicleLightState.reverse ? 5 : 0,
+  );
+}
+
+function updateIndicators(delta) {
+  if (!vehicleLightState.indicators) return;
+  vehicleLightState.indicatorElapsed = (
+    vehicleLightState.indicatorElapsed + delta
+  ) % INDICATOR_PERIOD;
+  const lit = vehicleLightState.indicatorElapsed < INDICATOR_ON_TIME;
+  if (lit !== vehicleLightState.indicatorLit) applyIndicatorIllumination(lit);
+}
+
+function updateHeadlightEmission() {
+  let directness = 0;
+  if (vehicleLightState.headlights) {
+    headlightViewDirection.subVectors(camera.position, headlightCenter).normalize();
+    headlightBeamDirection.subVectors(headlightTarget, headlightCenter).normalize();
+    const alignment = headlightViewDirection.dot(headlightBeamDirection);
+    directness = Math.pow(THREE.MathUtils.smoothstep(alignment, 0.84, 0.985), 1.7);
+  }
+
+  if (lampMaterials.headlights) {
+    lampMaterials.headlights.emissive.setHex(
+      vehicleLightState.headlights ? 0xffe4b5 : 0x000000,
+    );
+    lampMaterials.headlights.emissiveIntensity = vehicleLightState.headlights
+      ? 1.6 + directness * 28
+      : 0;
   }
 }
 
@@ -1593,6 +1993,8 @@ function render() {
   const delta = Math.min(clock.getDelta(), 0.05);
   updateCameraTween(delta);
   controls.update(delta);
+  updateIndicators(delta);
+  updateHeadlightEmission();
   composer.render(delta);
   adaptQuality(delta);
 }

@@ -38,6 +38,7 @@ try {
     '/usr/bin/chromium-browser',
   ].find((candidate) => candidate && existsSync(candidate));
   if (!chromePath) throw new Error('Chrome was not found. Set CHROME_PATH to run the browser smoke test.');
+  const useSoftwareRenderer = Boolean(process.env.CI);
 
   browser = await chromium.launch({
     executablePath: chromePath,
@@ -45,9 +46,10 @@ try {
     args: [
       '--no-sandbox',
       '--enable-webgl',
-      '--ignore-gpu-blocklist',
-      '--use-angle=swiftshader',
       '--disable-dev-shm-usage',
+      ...(useSoftwareRenderer
+        ? ['--use-angle=swiftshader']
+        : ['--enable-gpu', '--ignore-gpu-blocklist', '--disable-software-rasterizer']),
     ],
   });
 
@@ -63,8 +65,10 @@ try {
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   // The advanced WWC FBX is 2.19m triangles. Select balanced mode before shader compilation
-  // so the software-rendered CI check remains practical.
-  await page.evaluate(() => document.querySelector('[data-quality="balanced"]').click());
+  // so the software-rendered CI check remains practical; local smoke runs use the GPU.
+  if (useSoftwareRenderer) {
+    await page.evaluate(() => document.querySelector('[data-quality="balanced"]').click());
+  }
   await page.waitForSelector('body.is-ready', { timeout: 240_000 });
   await page.waitForTimeout(1500);
 

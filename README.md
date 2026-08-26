@@ -45,7 +45,8 @@ This is obfuscation, not DRM: because the browser must eventually receive the ke
 
 - Drag to orbit and scroll/pinch to zoom.
 - Use the camera rail or keys `1`–`5` for composed views.
-- Press `Space` to toggle auto orbit, `L` for headlights, and `F` for fullscreen.
+- Press `Space` to toggle auto orbit, `L` for headlights, `I` for indicators,
+  `B` for brake lights, `R` for reverse lights, and `F` for fullscreen.
 - **Configure** changes paint, exposure, studio rotation, lights, and render quality.
 - The camera icon saves the clean WebGL frame as a PNG.
 
