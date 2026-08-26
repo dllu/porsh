@@ -12,9 +12,28 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { keyShareA as encodedKeyShareA, modelMeta } from 'virtual:p959-model-runtime';
 import './style.css';
 
+class SceneExcludingGTAOPass extends GTAOPass {
+  excludedObjects = [];
+
+  render(renderer, writeBuffer, readBuffer, deltaTime, maskActive) {
+    const visibility = this.excludedObjects.map((object) => object.visible);
+    this.excludedObjects.forEach((object) => {
+      object.visible = false;
+    });
+    try {
+      super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
+    } finally {
+      this.excludedObjects.forEach((object, index) => {
+        object.visible = visibility[index];
+      });
+    }
+  }
+}
+
 const MODEL_META = modelMeta;
 const MODEL_URL = `${import.meta.env.BASE_URL}${MODEL_META.publicPath}`;
 const ENVIRONMENT_URL = `${import.meta.env.BASE_URL}environment/studio-small-09-2k.hdr`;
+const STUDIO_BASE_COLOR = 0x08090a;
 
 const canvas = document.querySelector('#scene');
 const loadingProgress = document.querySelector('#loading-progress');
@@ -66,7 +85,7 @@ renderer.toneMappingExposure = 0.92;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = false;
-renderer.setClearColor(0x08090a, 1);
+renderer.setClearColor(STUDIO_BASE_COLOR, 1);
 
 const scene = new THREE.Scene();
 scene.background = createStudioBackdrop();
@@ -97,7 +116,7 @@ scene.add(lights.group);
 
 const composer = new EffectComposer(renderer);
 const renderPass = new RenderPass(scene, camera);
-const gtaoPass = new GTAOPass(
+const gtaoPass = new SceneExcludingGTAOPass(
   scene,
   camera,
   window.innerWidth,
@@ -121,6 +140,10 @@ const gtaoPass = new GTAOPass(
     samples: 12,
   },
 );
+// The beauty pass still renders the floor and its directional shadow. Omitting
+// it only from GTAO prevents the transparent horizon from becoming a dark seam;
+// the dedicated contact texture supplies the close-range grounding beneath it.
+gtaoPass.excludedObjects.push(stage.floor);
 gtaoPass.output = GTAOPass.OUTPUT.Default;
 gtaoPass.blendIntensity = 0.66;
 
@@ -134,6 +157,7 @@ const bloomPass = new UnrealBloomPass(
 );
 const smaaPass = new SMAAPass();
 const outputPass = new OutputPass();
+enableOutputDithering(outputPass);
 
 composer.addPass(renderPass);
 composer.addPass(gtaoPass);
@@ -1777,14 +1801,21 @@ function createAdvancedMaterials(textures, studioReflectionMap, indicatorReflect
 function createStage() {
   const group = new THREE.Group();
 
+  const floorMaterial = new THREE.MeshStandardMaterial({
+    color: 0x090a0c,
+    metalness: 0.05,
+    roughness: 0.76,
+    envMapIntensity: 0.5,
+    transparent: true,
+    depthWrite: false,
+  });
+  enableStudioFloorFade(floorMaterial);
+
   const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(36, 36),
-    new THREE.MeshStandardMaterial({
-      color: 0x090a0c,
-      metalness: 0.05,
-      roughness: 0.76,
-      envMapIntensity: 0.5,
-    }),
+    // Keep every edge beyond the camera's far plane, even at the maximum
+    // mobile orbit distance. The shader below handles the visual transition.
+    new THREE.PlaneGeometry(240, 240),
+    floorMaterial,
   );
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = -0.105;
@@ -1831,6 +1862,34 @@ function createStage() {
   return { group, floor, plinth, contactShadow, edge };
 }
 
+function enableStudioFloorFade(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec2 vFloorPosition;',
+      )
+      .replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\nvFloorPosition = position.xy;',
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec2 vFloorPosition;',
+      )
+      .replace(
+        '#include <opaque_fragment>',
+        [
+          'float floorFade = 1.0 - smoothstep(10.0, 46.0, length(vFloorPosition));',
+          'diffuseColor.a *= floorFade;',
+          '#include <opaque_fragment>',
+        ].join('\n'),
+      );
+  };
+  material.customProgramCacheKey = () => 'studio-floor-fade-v1';
+}
+
 function createContactShadowTexture() {
   const shadowCanvas = document.createElement('canvas');
   shadowCanvas.width = 512;
@@ -1875,6 +1934,36 @@ function createStudioBackdrop() {
   texture.magFilter = THREE.LinearFilter;
   texture.generateMipmaps = false;
   return texture;
+}
+
+function enableOutputDithering(pass) {
+  const source = pass.material.fragmentShader;
+  const mainStart = source.indexOf('void main()');
+  const mainEnd = source.lastIndexOf('}');
+  if (mainStart < 0 || mainEnd <= mainStart) {
+    throw new Error('Unable to install output dithering');
+  }
+
+  // Tone mapping creates smooth values in the half-float composer, but the
+  // browser's 8-bit framebuffer still needs a half-LSB dither before it rounds.
+  // This static interleaved-gradient noise is below the threshold of visible
+  // grain while preventing large dark gradients from collapsing into bands.
+  const ditherFunction = `
+float outputDitherNoise(vec2 pixel) {
+  return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+}
+
+`;
+  const ditherOutput = `
+  gl_FragColor.rgb = clamp(
+    gl_FragColor.rgb + (outputDitherNoise(gl_FragCoord.xy) - 0.5) / 255.0,
+    0.0,
+    1.0
+  );
+`;
+
+  pass.material.fragmentShader = `${source.slice(0, mainStart)}${ditherFunction}${source.slice(mainStart, mainEnd)}${ditherOutput}${source.slice(mainEnd)}`;
+  pass.material.needsUpdate = true;
 }
 
 function createLighting() {
